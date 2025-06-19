@@ -1,0 +1,6 @@
+@echo off
+echo Activating virtual environment...
+call venv\Scripts\activate.bat
+
+echo Running trading bot...
+python trading_bot.py 
