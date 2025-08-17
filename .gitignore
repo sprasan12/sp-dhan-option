@@ -1,5 +1,8 @@
-# Environment variables
+# Environment variables and sensitive data
 .env
+*.env
+.env.local
+.env.production
 
 # Python
 __pycache__/
@@ -24,26 +27,51 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual environment
+# Virtual environments
 venv/
+.venv/
 env/
 ENV/
+env.bak/
+venv.bak/
 
 # IDE
 .vscode/
 .idea/
 *.swp
 *.swo
+*~
+
+# Logs
+logs/
+*.log
+
+# Data files
+*.csv
+*.json
+*.xlsx
+*.xls
+dhan_instruments.csv
 
 # OS
 .DS_Store
 Thumbs.db
 
-# Logs
-*.log
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.backup
 
-# Data files
-dhan_instruments.csv
+# Jupyter Notebook
+.ipynb_checkpoints
 
-# Test files
-test_connection.py 
+# pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json 
