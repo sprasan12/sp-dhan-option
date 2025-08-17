@@ -117,6 +117,10 @@ class PositionManager:
             target_rr = 2.0  # Fixed 2:1 risk:reward for both IMPS and CISD
             take_profit = round_to_tick(entry_price + (risk * target_rr), self.tick_size)
             
+            # Deduct the investment amount from account balance
+            total_investment = quantity * entry_price
+            self.account_manager.deduct_investment(total_investment)
+            
             # Place buy order with target and stop loss
             print(f"\n=== ENTERING TRADE ({trigger_type}) ===")
             print(f"Trigger Type: {trigger_type}")

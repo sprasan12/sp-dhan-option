@@ -455,6 +455,9 @@ class DualModeTradingBot:
         # Initialize historical data
         self.initialize_historical_data()
         
+        # Initialize previous 15-minute candle (essential for proper sweep detection)
+        self.initialize_previous_15min_candle()
+        
         if self.config.is_live_mode():
             # Setup live WebSocket
             if not self.setup_live_websocket():
@@ -477,25 +480,86 @@ class DualModeTradingBot:
         return True
     
     def stop_trading(self):
-        """Stop the trading bot"""
-        self.logger.info("Stopping trading bot...")
+        """Stop the trading bot with graceful shutdown"""
+        self.logger.info("🛑 Stopping trading bot with graceful shutdown...")
         
-        if self.config.is_live_mode():
-            if self.websocket:
-                self.websocket.close()
-        else:
-            if self.demo_client:
-                self.demo_client.stop_data_stream()
-                self.demo_client.stop_simulation()
-        
-        # Print final summary
-        if self.config.is_demo_mode():
-            self.broker.print_account_summary()
-        
-        self.logger.info("Trading bot stopped.")
+        try:
+            # Close all open positions
+            self._close_all_positions()
+            
+            # Stop data streams
+            if self.config.is_live_mode():
+                if self.websocket:
+                    self.websocket.close()
+            else:
+                if self.demo_client:
+                    self.demo_client.stop_data_stream()
+                    self.demo_client.stop_simulation()
+            
+            # Print final account summary
+            self._print_final_summary()
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error during shutdown: {e}")
+        finally:
+            self.logger.info("Trading bot stopped.")
+    
+    def _close_all_positions(self):
+        """Close all open positions before shutdown"""
+        try:
+            if self.position_manager and self.position_manager.is_trading:
+                self.logger.info("🔒 Closing all open positions...")
+                
+                # Get current positions
+                positions = self.broker.get_positions()
+                
+                if positions:
+                    for symbol, position in positions.items():
+                        if position.get('quantity', 0) > 0:
+                            self.logger.info(f"   Closing position: {symbol} - Quantity: {position['quantity']}")
+                            
+                            # Close position using position manager
+                            success = self.position_manager.close_position(symbol)
+                            
+                            if success:
+                                self.logger.info(f"   ✅ Position closed successfully: {symbol}")
+                            else:
+                                self.logger.warning(f"   ⚠️ Failed to close position: {symbol}")
+                else:
+                    self.logger.info("   No open positions to close")
+            else:
+                self.logger.info("   No active trading positions")
+                
+        except Exception as e:
+            self.logger.error(f"❌ Error closing positions: {e}")
+    
+    def _print_final_summary(self):
+        """Print final account summary"""
+        try:
+            self.logger.info("📊 FINAL ACCOUNT SUMMARY")
+            self.logger.info("=" * 50)
+            
+            # Print account balance
+            current_balance = self.account_manager.get_current_balance()
+            self.logger.info(f"💰 Final Account Balance: ₹{current_balance:,.2f}")
+            
+            # Print broker summary if available
+            if hasattr(self.broker, 'print_account_summary'):
+                self.broker.print_account_summary()
+            
+            # Print position manager summary
+            if self.position_manager:
+                self.position_manager.display_order_status()
+            
+            self.logger.info("=" * 50)
+            
+        except Exception as e:
+            self.logger.error(f"❌ Error printing final summary: {e}")
     
     def run(self):
         """Main run loop"""
+        global shutdown_requested
+        
         try:
             # Start trading
             if not self.start_trading():
@@ -504,7 +568,7 @@ class DualModeTradingBot:
             # Main loop
             self.logger.info("Trading bot is running. Press Ctrl+C to stop.")
             
-            while True:
+            while not shutdown_requested:
                 time.sleep(1)
                 
                 # Periodic tasks
@@ -516,16 +580,224 @@ class DualModeTradingBot:
                         break
                 
         except KeyboardInterrupt:
-            self.logger.info("Received interrupt signal")
+            self.logger.info("🛑 Received interrupt signal (Ctrl+C)")
         except Exception as e:
             self.logger.log_error("Error in main loop", e)
         finally:
             self.stop_trading()
 
+    def get_previous_15min_candle_time(self):
+        """
+        Get the timestamp for the previous 15-minute candle based on current time.
+        Handles market hours (9:15 AM - 3:30 PM, Mon-Fri) and previous day logic.
+        Returns timezone-aware timestamp.
+        """
+        import pytz
+        ist_tz = pytz.timezone('Asia/Kolkata')
+        
+        now = datetime.now(ist_tz)
+        
+        # Check if it's a weekday (Monday = 0, Sunday = 6)
+        if now.weekday() >= 5:  # Saturday or Sunday
+            # Go back to Friday 3:30 PM
+            days_back = now.weekday() - 4  # Friday is 4
+            target_date = now - timedelta(days=days_back)
+            target_time = target_date.replace(hour=15, minute=30, second=0, microsecond=0)
+        else:
+            # It's a weekday
+            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
+                # Before market opens, get previous day's last candle
+                if now.weekday() == 0:  # Monday
+                    # Go back to Friday 3:30 PM
+                    target_date = now - timedelta(days=3)
+                else:
+                    # Go back to previous day 3:30 PM
+                    target_date = now - timedelta(days=1)
+                target_time = target_date.replace(hour=15, minute=30, second=0, microsecond=0)
+            elif now.hour > 15 or (now.hour == 15 and now.minute > 30):
+                # After market closes, get today's last candle
+                target_time = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            else:
+                # During market hours, get the previous 15-minute candle
+                # 15-minute intervals: 9:15, 9:30, 9:45, 10:00, 10:15, 10:30, etc.
+                current_minute = now.minute
+                current_hour = now.hour
+                
+                # Find the previous 15-minute boundary
+                if current_minute < 15:
+                    if current_hour == 9:
+                        # Before 9:15, get previous day's last candle
+                        if now.weekday() == 0:  # Monday
+                            target_date = now - timedelta(days=3)
+                        else:
+                            target_date = now - timedelta(days=1)
+                        target_time = target_date.replace(hour=15, minute=30, second=0, microsecond=0)
+                    else:
+                        target_time = now.replace(hour=current_hour-1, minute=45, second=0, microsecond=0)
+                elif current_minute < 30:
+                    target_time = now.replace(minute=15, second=0, microsecond=0)
+                elif current_minute < 45:
+                    target_time = now.replace(minute=30, second=0, microsecond=0)
+                else:
+                    target_time = now.replace(minute=45, second=0, microsecond=0)
+        
+        return target_time
+    
+    def initialize_previous_15min_candle(self):
+        """
+        Initialize the previous 15-minute candle before starting to track.
+        This is essential for proper sweep detection.
+        """
+        try:
+            self.logger.info("🔄 Initializing previous 15-minute candle...")
+            
+            # Get the timestamp for the previous 15-minute candle
+            previous_candle_time = self.get_previous_15min_candle_time()
+            self.logger.info(f"   Previous 15-min candle time: {previous_candle_time.strftime('%Y-%m-%d %H:%M:%S %Z')}")
+            
+            # Calculate the start time for fetching historical data
+            # We need at least 1 15-minute candles for proper tracking
+            start_time = previous_candle_time - timedelta(minutes=15)
+            
+            if self.config.is_live_mode():
+                # For live mode, fetch from Dhan API
+                self._fetch_live_previous_15min_candle(start_time, previous_candle_time)
+            else:
+                # For demo mode, use the demo server's historical data
+                self._fetch_demo_previous_15min_candle(start_time, previous_candle_time)
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Could not initialize previous 15-minute candle: {e}")
+            self.logger.info("   Continuing with current initialization method...")
+            import traceback
+            self.logger.warning(f"   Traceback: {traceback.format_exc()}")
+    
+    def _fetch_live_previous_15min_candle(self, start_time, end_time):
+        """Fetch previous 15-minute candle for live trading"""
+        try:
+            # Fetch 15-minute candles from start_time to end_time
+            historical_data = self.historical_fetcher.fetch_15min_candles(
+                symbol=self.symbol,
+                instruments_df=self.instruments_df,
+                start_date=start_time,
+                end_date=end_time
+            )
+            
+            if historical_data is not None and len(historical_data) > 0:
+                # Convert to Candle objects and add to 15-minute candle list
+                for _, row in historical_data.iterrows():
+                    candle = Candle(
+                        timestamp=row['timestamp'],
+                        open=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close']),
+                        volume=int(row['volume']) if 'volume' in row else 0
+                    )
+                    self.fifteen_min_candles.append(candle)
+                
+                self.logger.info(f"✅ Loaded {len(self.fifteen_min_candles)} historical 15-minute candles")
+                
+                # Set last candle time
+                if self.fifteen_min_candles:
+                    self.last_15min_candle_time = self.fifteen_min_candles[-1].timestamp
+                    self.logger.info(f"   Last 15-min candle: {self.last_15min_candle_time.strftime('%H:%M:%S')}")
+            else:
+                self.logger.warning("⚠️ No historical data received for previous 15-minute candle")
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error fetching live previous 15-minute candle: {e}")
+    
+    def _fetch_demo_previous_15min_candle(self, start_time, end_time):
+        """Fetch previous 15-minute candle for demo trading"""
+        try:
+            # For demo mode, we need to aggregate 1-minute candles into 15-minute candles
+            # This should be done from the demo server's historical data
+            
+            if self.demo_server and hasattr(self.demo_server, 'historical_data'):
+                # Get 1-minute candles from the demo server's historical data
+                demo_data = self.demo_server.historical_data
+                
+                if demo_data is not None and len(demo_data) > 0:
+                    # Convert start_time and end_time to timezone-aware timestamps
+                    # to match the demo data's timezone
+                    import pytz
+                    ist_tz = pytz.timezone('Asia/Kolkata')
+                    
+                    # Make timestamps timezone-aware
+                    start_time_aware = ist_tz.localize(start_time) if start_time.tzinfo is None else start_time
+                    end_time_aware = ist_tz.localize(end_time) if end_time.tzinfo is None else end_time
+                    
+                    # Filter data for the required time range
+                    filtered_data = demo_data[
+                        (demo_data['timestamp'] >= start_time_aware) & 
+                        (demo_data['timestamp'] <= end_time_aware)
+                    ]
+                    
+                    if len(filtered_data) > 0:
+                        # Aggregate 1-minute candles into 15-minute candles
+                        self._aggregate_1min_to_15min_candles(filtered_data)
+                        self.logger.info(f"✅ Aggregated {len(self.fifteen_min_candles)} 15-minute candles from demo data")
+                    else:
+                        self.logger.warning("⚠️ No demo data available for the required time range")
+                        self.logger.info(f"   Requested range: {start_time_aware} to {end_time_aware}")
+                        self.logger.info(f"   Available data range: {demo_data['timestamp'].min()} to {demo_data['timestamp'].max()}")
+                else:
+                    self.logger.warning("⚠️ No demo historical data available")
+            else:
+                self.logger.warning("⚠️ Demo server not properly initialized")
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error fetching demo previous 15-minute candle: {e}")
+            import traceback
+            self.logger.warning(f"   Traceback: {traceback.format_exc()}")
+    
+    def _aggregate_1min_to_15min_candles(self, one_min_data):
+        """Aggregate 1-minute candles into 15-minute candles"""
+        try:
+            # Group 1-minute candles by 15-minute intervals
+            one_min_data['timestamp'] = pd.to_datetime(one_min_data['timestamp'])
+            one_min_data['15min_group'] = one_min_data['timestamp'].dt.floor('15min')
+            
+            # Aggregate by 15-minute groups
+            grouped = one_min_data.groupby('15min_group').agg({
+                'open': 'first',
+                'high': 'max',
+                'low': 'min',
+                'close': 'last',
+                'volume': 'sum'
+            }).reset_index()
+            
+            # Convert to Candle objects
+            for _, row in grouped.iterrows():
+                candle = Candle(
+                    timestamp=row['15min_group'],
+                    open=float(row['open']),
+                    high=float(row['high']),
+                    low=float(row['low']),
+                    close=float(row['close']),
+                    volume=int(row['volume'])
+                )
+                self.fifteen_min_candles.append(candle)
+                
+        except Exception as e:
+            self.logger.warning(f"⚠️ Error aggregating 1-minute to 15-minute candles: {e}")
+
 def signal_handler(signum, frame):
-    """Handle interrupt signals"""
-    print(f"\nReceived signal {signum}")
+    """Handle interrupt signals with graceful shutdown"""
+    print(f"\n🛑 Received signal {signum} (Ctrl+C)")
+    print("🔄 Initiating graceful shutdown...")
+    
+    # Set a global flag to indicate shutdown
+    global shutdown_requested
+    shutdown_requested = True
+    
+    # Give some time for graceful shutdown
+    time.sleep(2)
     sys.exit(0)
+
+# Global flag for shutdown
+shutdown_requested = False
 
 if __name__ == "__main__":
     # Setup signal handlers

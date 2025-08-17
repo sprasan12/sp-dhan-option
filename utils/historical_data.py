@@ -271,20 +271,25 @@ class HistoricalDataFetcher:
             return None
     
     def fetch_15min_candles(self, symbol: str, instruments_df: pd.DataFrame, 
-                           days_back: int = 30) -> Optional[pd.DataFrame]:
+                           days_back: int = 30, start_date: datetime = None, 
+                           end_date: datetime = None) -> Optional[pd.DataFrame]:
         """
-        Fetch last N days of 15-minute candles for live trading initialization
+        Fetch 15-minute candles for live trading initialization
         
         Args:
             symbol: Trading symbol
             instruments_df: Instruments dataframe
-            days_back: Number of days to look back
+            days_back: Number of days to look back (used if start_date/end_date not provided)
+            start_date: Start date for historical data
+            end_date: End date for historical data
         
         Returns:
             DataFrame with 15-minute candles or None if failed
         """
-        end_date = datetime.now()
-        start_date = end_date - timedelta(days=days_back)
+        if start_date is None or end_date is None:
+            # Use days_back parameter
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back)
         
         return self.fetch_historical_data(
             symbol=symbol,

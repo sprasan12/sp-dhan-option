@@ -77,9 +77,8 @@ class DemoBroker:
                 order["filledQuantity"] = quantity
                 order["status"] = "FILLED"
                 
-                # For demo trading, we don't deduct balance on BUY orders
-                # The balance will be updated when the position is closed (SELL)
-                # This simulates margin trading where you don't need full cash upfront
+                # Note: Account balance is managed by AccountManager, not here
+                # The AccountManager already deducted the investment when the trade was approved
                 
                 # Track position
                 self._update_position(order)
@@ -144,13 +143,7 @@ class DemoBroker:
                 position["quantity"] -= quantity
                 position["totalValue"] = position["avgPrice"] * position["quantity"]
                 
-                # Update account balance with the P&L
-                if self.account_manager:
-                    self.account_manager.update_balance(pnl)
-                else:
-                    self.virtual_balance += pnl
-                
-                # Record trade
+                # Record trade (AccountManager will handle balance updates)
                 trade = {
                     "symbol": symbol,
                     "side": side,
@@ -166,7 +159,7 @@ class DemoBroker:
                 print(f"  Entry Price: ₹{position['avgPrice']:.2f}")
                 print(f"  Exit Price: ₹{price:.2f}")
                 print(f"  Quantity: {quantity}")
-                print(f"  Updated Balance: ₹{self.get_account_balance():,.2f}")
+                print(f"  Note: Balance update handled by AccountManager")
                 
                 # If position is closed, remove it
                 if position["quantity"] == 0:

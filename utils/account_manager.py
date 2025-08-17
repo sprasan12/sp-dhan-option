@@ -60,26 +60,63 @@ class AccountManager:
         self.logger.info(f"   Max Loss per Lot: ₹{max_loss_per_lot:.2f}")
         self.logger.info(f"   Fixed SL Amount: ₹{self.fixed_sl_amount:.2f}")
         
-        # Calculate how many lots we can trade
+        # Calculate how many lots we can trade based on SL limit
         if max_loss_per_lot <= 0:
             self.logger.warning(f"❌ Trade Rejected: Invalid SL distance")
             return False, 0, 0, 0
         
-        max_lots = math.floor(self.fixed_sl_amount / max_loss_per_lot)
+        max_lots_by_sl = math.floor(self.fixed_sl_amount / max_loss_per_lot)
+        
+        if max_lots_by_sl <= 0:
+            self.logger.warning(f"❌ Trade Rejected: Max loss per lot (₹{max_loss_per_lot:.2f}) > Fixed SL amount (₹{self.fixed_sl_amount:.2f})")
+            return False, 0, 0, 0
+        
+        # Calculate how many lots we can afford with current balance
+        investment_per_lot = market_price * self.config.lot_size
+        max_lots_by_balance = math.floor(self.current_balance / investment_per_lot)
+        
+        self.logger.info(f"   Investment per Lot: ₹{investment_per_lot:.2f}")
+        self.logger.info(f"   Available Balance: ₹{self.current_balance:.2f}")
+        self.logger.info(f"   Max Lots by SL: {max_lots_by_sl}")
+        self.logger.info(f"   Max Lots by Balance: {max_lots_by_balance}")
+        
+        # Take the minimum of both limits
+        max_lots = min(max_lots_by_sl, max_lots_by_balance)
         
         if max_lots <= 0:
-            self.logger.warning(f"❌ Trade Rejected: Max loss per lot (₹{max_loss_per_lot:.2f}) > Fixed SL amount (₹{self.fixed_sl_amount:.2f})")
+            if max_lots_by_balance <= 0:
+                self.logger.warning(f"❌ Trade Rejected: Insufficient balance. Need ₹{investment_per_lot:.2f} per lot, have ₹{self.current_balance:.2f}")
+            else:
+                self.logger.warning(f"❌ Trade Rejected: Cannot afford even 1 lot. Need ₹{investment_per_lot:.2f}, have ₹{self.current_balance:.2f}")
             return False, 0, 0, 0
         
         # Calculate actual SL amount for this trade
         actual_sl_amount = max_lots * max_loss_per_lot
+        total_investment = max_lots * investment_per_lot
         
         self.logger.info(f"✅ Trade Approved:")
-        self.logger.info(f"   Max Lots Possible: {max_lots}")
+        self.logger.info(f"   Final Lots: {max_lots}")
         self.logger.info(f"   Actual SL Amount: ₹{actual_sl_amount:.2f}")
-        self.logger.info(f"   Total Investment: ₹{max_lots * self.config.lot_size * market_price:.2f}")
+        self.logger.info(f"   Total Investment: ₹{total_investment:.2f}")
+        self.logger.info(f"   Remaining Balance: ₹{self.current_balance - total_investment:.2f}")
+        
+        # Note: Investment will be deducted when trade is actually placed
+        # Don't deduct here as this is just parameter calculation
         
         return True, max_lots, actual_sl_amount, max_loss_per_lot
+    
+    def deduct_investment(self, investment_amount: float):
+        """Deduct investment amount from account balance"""
+        old_balance = self.current_balance
+        self.current_balance -= investment_amount
+        self.logger.info(f"💰 Investment Deducted: ₹{old_balance:,.2f} → ₹{self.current_balance:,.2f} (Investment: ₹{investment_amount:,.2f})")
+    
+    def add_investment_return(self, investment_amount: float, pnl: float):
+        """Add back investment amount plus P&L to account balance"""
+        total_return = investment_amount + pnl
+        old_balance = self.current_balance
+        self.current_balance += total_return
+        self.logger.info(f"💰 Investment Returned: ₹{old_balance:,.2f} → ₹{self.current_balance:,.2f} (Return: ₹{total_return:,.2f} = Investment: ₹{investment_amount:,.2f} + P&L: ₹{pnl:,.2f})")
     
     def calculate_pnl(self, entry_price: float, exit_price: float, lots: int, is_buy: bool = True) -> float:
         """
@@ -123,5 +160,5 @@ class AccountManager:
         self.logger.info(f"   P&L: ₹{pnl:.2f}")
         self.logger.info(f"   Account Balance: ₹{self.current_balance:.2f}")
         
-        # Update balance
-        self.update_balance(pnl)
+        # Add back investment amount plus P&L
+        self.add_investment_return(total_investment, pnl)
