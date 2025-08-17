@@ -25,6 +25,12 @@ class TradingConfig:
         self.max_15min_candles = int(os.getenv('MAX_15MIN_CANDLES', 30))
         self.quantity = int(os.getenv('TRADING_QUANTITY', 1))  # Number of lots/quantity to trade
         
+        # Account management settings
+        self.account_start_balance = float(os.getenv('ACCT_START_BALANCE', 50000))  # Starting balance in INR
+        self.fixed_sl_percentage = float(os.getenv('FIXED_SL_PERCENTAGE', 10.0))  # Fixed SL as percentage of account balance
+        self.lot_size = int(os.getenv('LOT_SIZE', 75))  # Quantity per lot
+        self.max_sl_percentage_of_price = float(os.getenv('MAX_SL_PERCENTAGE_OF_PRICE', 15.0))  # Max SL as percentage of market price
+        
         # Live trading settings
         self.client_id = os.getenv('DHAN_CLIENT_ID')
         self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
@@ -59,6 +65,10 @@ class TradingConfig:
         """Get demo start datetime"""
         return datetime.strptime(self.demo_start_date, '%Y-%m-%d')
     
+    def get_fixed_sl_amount(self):
+        """Get fixed SL amount in INR"""
+        return self.account_start_balance * (self.fixed_sl_percentage / 100.0)
+    
     def validate_config(self):
         """Validate configuration settings"""
         if self.is_live_mode():
@@ -71,6 +81,16 @@ class TradingConfig:
             except ValueError:
                 raise ValueError("Invalid DEMO_START_DATE format. Use YYYY-MM-DD")
         
+        # Validate account settings
+        if self.account_start_balance <= 0:
+            raise ValueError("ACCT_START_BALANCE must be positive")
+        if self.fixed_sl_percentage <= 0 or self.fixed_sl_percentage > 100:
+            raise ValueError("FIXED_SL_PERCENTAGE must be between 0 and 100")
+        if self.lot_size <= 0:
+            raise ValueError("LOT_SIZE must be positive")
+        if self.max_sl_percentage_of_price <= 0 or self.max_sl_percentage_of_price > 100:
+            raise ValueError("MAX_SL_PERCENTAGE_OF_PRICE must be between 0 and 100")
+        
         return True
     
     def print_config(self):
@@ -80,6 +100,10 @@ class TradingConfig:
         print(f"Tick Size: {self.tick_size}")
         print(f"Max 15-min Candles: {self.max_15min_candles}")
         print(f"Trading Quantity: {self.quantity}")
+        print(f"Account Start Balance: ₹{self.account_start_balance:,.2f}")
+        print(f"Fixed SL Amount: ₹{self.get_fixed_sl_amount():,.2f} ({self.fixed_sl_percentage}% of balance)")
+        print(f"Lot Size: {self.lot_size}")
+        print(f"Max SL % of Price: {self.max_sl_percentage_of_price}%")
         print(f"Swing Look Back: {self.swing_look_back}")
         print(f"Log Level: {self.log_level}")
         print(f"Log to File: {self.log_to_file}")

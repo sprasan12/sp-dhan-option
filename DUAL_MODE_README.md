@@ -25,6 +25,15 @@ A sophisticated trading bot that supports both **Live Trading** and **Demo Tradi
 - **CISD (Candle In Sweep Detection)**: Price passing bear candle opens
 - **Risk Management**: Fixed 2:1 Risk:Reward ratio for all trades
 
+### 💰 Account Management & Risk Control
+- **Fixed Account Balance**: Configurable starting balance (default: ₹50,000)
+- **Fixed SL Amount**: 10% of account balance as maximum risk per trade
+- **Lot-Based Trading**: Automatic lot calculation based on risk parameters
+- **SL Percentage Limits**: Maximum 15% of market price for stop loss
+- **Dynamic Lot Sizing**: Calculates optimal number of lots based on risk
+- **Balance Tracking**: Real-time account balance updates after each trade
+- **Comprehensive Logging**: Detailed trade summaries with P&L and balance
+
 ## Architecture
 
 ```
@@ -77,6 +86,12 @@ DualModeTradingBot/
    # Trading Mode
    TRADING_MODE=demo  # or 'live'
    
+   # Account Management Settings
+   ACCT_START_BALANCE=50000        # Starting balance in INR
+   FIXED_SL_PERCENTAGE=10.0        # Fixed SL as % of account balance
+   LOT_SIZE=75                     # Quantity per lot
+   MAX_SL_PERCENTAGE_OF_PRICE=15.0 # Max SL as % of market price
+   
    # Live Trading (required for live mode)
    DHAN_CLIENT_ID=your_client_id
    DHAN_ACCESS_TOKEN=your_access_token
@@ -87,11 +102,11 @@ DualModeTradingBot/
    TRADING_SYMBOL=NIFTY24JAN19000CE
    
    # Demo Settings
-DEMO_START_DATE=2024-12-15  # Set to recent date for demo trading
-DEMO_INTERVAL_MINUTES=1
-DEMO_STREAM_INTERVAL_SECONDS=1.0  # How fast to stream each candle (lower = faster backtesting)
-DEMO_SERVER_PORT=8080
-HISTORICAL_DATA_DAYS=7
+   DEMO_START_DATE=2024-12-15  # Set to recent date for demo trading
+   DEMO_INTERVAL_MINUTES=1
+   DEMO_STREAM_INTERVAL_SECONDS=1.0  # How fast to stream each candle (lower = faster backtesting)
+   DEMO_SERVER_PORT=8080
+   HISTORICAL_DATA_DAYS=7
    ```
 
 ## Usage
@@ -198,6 +213,37 @@ DEMO_STREAM_INTERVAL_SECONDS=2.0
 - **Condition**: Price passes the open of bear candle(s) that helped in sweeping
 - **Stop Loss**: Low of lowest tracked bear candle
 - **Target**: 2:1 Risk:Reward ratio
+
+## Account Management & Risk Control
+
+### Fixed Risk Per Trade
+- **Fixed SL Amount**: 10% of account balance (e.g., ₹5,000 for ₹50,000 balance)
+- **Lot-Based Trading**: All trades use lot sizes (75 quantity per lot)
+- **Dynamic Lot Calculation**: Automatically calculates optimal lots based on risk
+
+### Lot Calculation Example
+```
+Account Balance: ₹50,000
+Fixed SL Amount: ₹5,000 (10%)
+Market Price: ₹100
+Stop Loss: ₹90
+Risk per Lot: ₹10 × 75 = ₹750
+Max Lots: ₹5,000 ÷ ₹750 = 6 lots
+Total Investment: 6 × 75 × ₹100 = ₹45,000
+```
+
+### Risk Validation Rules
+1. **SL Percentage Check**: Stop loss must be < 15% of market price
+2. **Lot Feasibility**: Must be able to buy at least 1 lot within SL limit
+3. **Balance Sufficiency**: Account must have enough balance for investment
+
+### Trade Summary Logging
+Every trade exit includes:
+- Entry/Exit prices and P&L
+- Number of lots traded
+- Total investment amount
+- Updated account balance
+- Risk parameters used
 
 ## API Endpoints (Demo Mode)
 

@@ -24,6 +24,7 @@ from utils.historical_data import HistoricalDataFetcher
 from demo.demo_server import DemoServer
 from demo.demo_data_client import DemoDataClient
 from utils.logger import TradingLogger
+from utils.account_manager import AccountManager
 import logging
 
 # Load environment variables
@@ -45,12 +46,19 @@ class DualModeTradingBot:
             log_level=log_level
         )
         
+        # Initialize account manager
+        self.account_manager = AccountManager(self.config, self.logger)
+        
         # Log configuration
         config_dict = {
             'Mode': self.config.mode.value.upper(),
             'Tick Size': self.config.tick_size,
             'Max 15-min Candles': self.config.max_15min_candles,
             'Trading Quantity': self.config.quantity,
+            'Account Start Balance': f"₹{self.config.account_start_balance:,.2f}",
+            'Fixed SL Amount': f"₹{self.config.get_fixed_sl_amount():,.2f}",
+            'Lot Size': self.config.lot_size,
+            'Max SL % of Price': f"{self.config.max_sl_percentage_of_price}%",
             'Swing Look Back': self.config.swing_look_back,
             'Log Level': self.config.log_level,
             'Log to File': self.config.log_to_file,
@@ -87,7 +95,7 @@ class DualModeTradingBot:
             logger=self.logger,
             exit_callback=self._on_strategy_trade_exit
         )
-        self.position_manager = PositionManager(self.broker, self.config.tick_size)
+        self.position_manager = PositionManager(self.broker, self.account_manager, self.config.tick_size)
         
         # Market data
         self.instruments_df = None
@@ -114,6 +122,7 @@ class DualModeTradingBot:
         
         self.logger.info(f"Trading Bot initialized in {self.config.mode.value.upper()} mode")
         self.logger.info(f"Trading Symbol: {self.symbol}")
+        self.logger.info(f"Account Balance: ₹{self.account_manager.get_current_balance():,.2f}")
     
     def _init_live_mode(self):
         """Initialize components for live trading mode"""
@@ -138,8 +147,8 @@ class DualModeTradingBot:
         """Initialize components for demo trading mode"""
         self.logger.info("Initializing DEMO trading mode...")
         
-        # Initialize demo broker
-        self.broker = DemoBroker(self.config.tick_size)
+        # Initialize demo broker with account manager
+        self.broker = DemoBroker(self.config.tick_size, self.account_manager)
         
         # Initialize historical data fetcher
         self.historical_fetcher = HistoricalDataFetcher(
@@ -414,14 +423,12 @@ class DualModeTradingBot:
             
             # Also update position manager for order placement
             symbol = self.symbol
-            quantity = self.config.quantity
             instruments_df = self.instruments_df
             
             success = self.position_manager.enter_trade_with_trigger(
                 sweep_trigger, 
                 sweep_trigger.get('type', 'UNKNOWN'),
                 symbol,
-                quantity,
                 instruments_df
             )
             

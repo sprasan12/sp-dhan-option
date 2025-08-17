@@ -11,11 +11,16 @@ from utils.market_utils import round_to_tick
 class DemoBroker:
     """Demo broker for virtual trading and backtesting"""
     
-    def __init__(self, tick_size: float = 0.05):
+    def __init__(self, tick_size: float = 0.05, account_manager=None):
         self.tick_size = tick_size
+        self.account_manager = account_manager
         
-        # Virtual account state
-        self.virtual_balance = 100000  # Starting balance
+        # Virtual account state - use account manager if provided
+        if account_manager:
+            self.virtual_balance = account_manager.get_current_balance()
+        else:
+            self.virtual_balance = 100000  # Fallback starting balance
+            
         self.positions = {}  # Current open positions
         self.order_history = []  # All orders placed
         self.trade_history = []  # Completed trades with P&L
@@ -33,6 +38,8 @@ class DemoBroker:
     
     def get_account_balance(self) -> float:
         """Get current virtual account balance"""
+        if self.account_manager:
+            return self.account_manager.get_current_balance()
         return self.virtual_balance
     
     def place_order(self, symbol: str, quantity: int, order_type: str = "MARKET", 
@@ -74,8 +81,14 @@ class DemoBroker:
                 order_value = order["filledPrice"] * quantity
                 if side == "BUY":
                     self.virtual_balance -= order_value
+                    # Update account manager if available
+                    if self.account_manager:
+                        self.account_manager.update_balance(-order_value)
                 else:  # SELL
                     self.virtual_balance += order_value
+                    # Update account manager if available
+                    if self.account_manager:
+                        self.account_manager.update_balance(order_value)
                 
                 # Track position
                 self._update_position(order)
@@ -87,8 +100,8 @@ class DemoBroker:
             print(f"  Symbol: {symbol}")
             print(f"  Side: {side}")
             print(f"  Quantity: {quantity}")
-            print(f"  Price: {order['filledPrice']}")
-            print(f"  Virtual Balance: ₹{self.virtual_balance:,.2f}")
+            print(f"  Price: ₹{order['filledPrice']:.2f}")
+            print(f"  Virtual Balance: ₹{self.get_account_balance():,.2f}")
             
             return {
                 "orderId": order_id,

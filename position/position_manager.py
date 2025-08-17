@@ -9,8 +9,9 @@ from utils.market_utils import round_to_tick
 class PositionManager:
     """Manages trading positions, orders, and risk management"""
     
-    def __init__(self, broker, tick_size=0.05):
+    def __init__(self, broker, account_manager, tick_size=0.05):
         self.broker = broker
+        self.account_manager = account_manager
         self.tick_size = tick_size
         
         # Position tracking
@@ -67,8 +68,8 @@ class PositionManager:
             self.current_position = None
             print("✅ Order cleanup completed")
     
-    def enter_trade_with_trigger(self, trigger, trigger_type, symbol, quantity, instruments_df):
-        """Enter trade based on IMPS or CISD trigger"""
+    def enter_trade_with_trigger(self, trigger, trigger_type, symbol, instruments_df):
+        """Enter trade based on IMPS or CISD trigger with account manager integration"""
         # Check if we're already trading
         if self.is_trading:
             print("🚫 Already in a trade, skipping new entry")
@@ -97,6 +98,18 @@ class PositionManager:
             entry_price = round_to_tick(trigger['entry'], self.tick_size)
             stop_loss = round_to_tick(trigger['stop_loss'], self.tick_size)
             
+            # Use account manager to calculate trade parameters
+            can_trade, lots, actual_sl_amount, max_loss_per_lot = self.account_manager.calculate_trade_parameters(
+                entry_price, stop_loss
+            )
+            
+            if not can_trade:
+                print("❌ Trade rejected by account manager")
+                return False
+            
+            # Calculate quantity based on lots
+            quantity = lots * self.account_manager.config.lot_size
+            
             # Calculate risk (entry - stop loss)
             risk = entry_price - stop_loss
             
@@ -107,9 +120,14 @@ class PositionManager:
             # Place buy order with target and stop loss
             print(f"\n=== ENTERING TRADE ({trigger_type}) ===")
             print(f"Trigger Type: {trigger_type}")
-            print(f"Entry Price: {entry_price:.2f}")
-            print(f"Stop Loss: {stop_loss:.2f}")
-            print(f"Take Profit: {take_profit:.2f}")
+            print(f"Entry Price: ₹{entry_price:.2f}")
+            print(f"Stop Loss: ₹{stop_loss:.2f}")
+            print(f"Take Profit: ₹{take_profit:.2f}")
+            print(f"Lots: {lots}")
+            print(f"Quantity: {quantity}")
+            print(f"Risk per Lot: ₹{max_loss_per_lot:.2f}")
+            print(f"Total Risk: ₹{actual_sl_amount:.2f}")
+            print(f"Total Investment: ₹{quantity * entry_price:.2f}")
             print(f"Risk: {risk:.2f}")
             print(f"Reward: {risk * target_rr:.2f}")
             print(f"Risk:Reward = 1:{target_rr}")
@@ -137,6 +155,7 @@ class PositionManager:
                     'type': 'BUY',
                     'symbol': symbol,
                     'quantity': quantity,
+                    'lots': lots,
                     'entry_price': entry_price,
                     'target_price': take_profit,
                     'stop_loss_price': stop_loss,
@@ -152,6 +171,7 @@ class PositionManager:
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
                 'quantity': quantity,
+                'lots': lots,
                 'buy_order_id': order_id,
                 'risk': risk,
                 'reward': risk * target_rr,
@@ -159,13 +179,15 @@ class PositionManager:
                 'target_updated_50': False,
                 'target_updated_100': False,
                 'max_price_reached': entry_price,
-                'trigger_type': trigger_type
+                'trigger_type': trigger_type,
+                'actual_sl_amount': actual_sl_amount,
+                'max_loss_per_lot': max_loss_per_lot
             }
             
             print(f"✅ Trade entered successfully!")
             print(f"Buy Order ID: {order_id}")
-            print(f"Target Price: {take_profit:.2f}")
-            print(f"Stop Loss Price: {stop_loss:.2f}")
+            print(f"Target Price: ₹{take_profit:.2f}")
+            print(f"Stop Loss Price: ₹{stop_loss:.2f}")
             print(f"Active Orders: {len(self.active_orders)}")
             
             return True
@@ -203,10 +225,10 @@ class PositionManager:
             # Update target to 1:2 risk:reward
             new_target = round_to_tick(entry_price + (risk * 2.0), self.tick_size)
             print(f"\n=== TARGET UPDATE: 50% MOVE DETECTED ===")
-            print(f"Current Price: {current_price:.2f}")
-            print(f"Price Move: {price_move:.2f} ({price_move_percent:.1%} of risk)")
-            print(f"Old Target: {self.current_position['take_profit']:.2f} (1:{self.current_position['current_risk_reward']:.1f})")
-            print(f"New Target: {new_target:.2f} (1:2.0)")
+            print(f"Current Price: ₹{current_price:.2f}")
+            print(f"Price Move: ₹{price_move:.2f} ({price_move_percent:.1%} of risk)")
+            print(f"Old Target: ₹{self.current_position['take_profit']:.2f} (1:{self.current_position['current_risk_reward']:.1f})")
+            print(f"New Target: ₹{new_target:.2f} (1:2.0)")
             
             # Modify the order target
             modify_response = self.broker.modify_target(
@@ -229,10 +251,10 @@ class PositionManager:
             # Update target to 1:4 risk:reward
             new_target = round_to_tick(entry_price + (risk * 4.0), self.tick_size)
             print(f"\n=== TARGET UPDATE: 100% MOVE DETECTED ===")
-            print(f"Current Price: {current_price:.2f}")
-            print(f"Price Move: {price_move:.2f} ({price_move_percent:.1%} of risk)")
-            print(f"Old Target: {self.current_position['take_profit']:.2f} (1:{self.current_position['current_risk_reward']:.1f})")
-            print(f"New Target: {new_target:.2f} (1:4.0)")
+            print(f"Current Price: ₹{current_price:.2f}")
+            print(f"Price Move: ₹{price_move:.2f} ({price_move_percent:.1%} of risk)")
+            print(f"Old Target: ₹{self.current_position['take_profit']:.2f} (1:{self.current_position['current_risk_reward']:.1f})")
+            print(f"New Target: ₹{new_target:.2f} (1:4.0)")
             
             # Modify the order target
             modify_response = self.broker.modify_target(
@@ -256,8 +278,8 @@ class PositionManager:
         if new_stop_loss > self.current_position['stop_loss']:
             # Update the stop loss using modify_target
             print(f"\n=== UPDATING TRAILING STOP ===")
-            print(f"Old Stop Loss: {self.current_position['stop_loss']:.2f}")
-            print(f"New Stop Loss: {new_stop_loss:.2f}")
+            print(f"Old Stop Loss: ₹{self.current_position['stop_loss']:.2f}")
+            print(f"New Stop Loss: ₹{new_stop_loss:.2f}")
             
             # Modify the existing order with new stop loss
             modify_response = self.broker.modify_target(
@@ -269,26 +291,36 @@ class PositionManager:
                 # Update position details
                 self.current_position['stop_loss'] = new_stop_loss
                 print(f"Trailing stop updated successfully!")
-                print(f"New Stop Loss: {new_stop_loss:.2f}")
+                print(f"New Stop Loss: ₹{new_stop_loss:.2f}")
             else:
                 print("Failed to update trailing stop")
     
     def handle_trade_exit(self, exit_price, exit_reason):
-        """Handle automatic trade exit (stop loss or target hit)"""
+        """Handle automatic trade exit (stop loss or target hit) with account manager integration"""
         if not self.is_trading or not self.current_position:
             return True
         
         print(f"\n=== TRADE EXIT DETECTED ===")
         print(f"Exit Reason: {exit_reason}")
-        print(f"Exit Price: {exit_price:.2f}")
-        print(f"Entry Price: {self.current_position['entry_price']:.2f}")
+        print(f"Exit Price: ₹{exit_price:.2f}")
+        print(f"Entry Price: ₹{self.current_position['entry_price']:.2f}")
         
-        # Calculate P&L
+        # Calculate P&L using account manager
         entry_price = self.current_position['entry_price']
-        quantity = self.current_position['quantity']
-        pnl = (exit_price - entry_price) * quantity
+        lots = self.current_position['lots']
+        pnl = self.account_manager.calculate_pnl(entry_price, exit_price, lots)
         
-        print(f"P&L: {pnl:.2f}")
+        print(f"P&L: ₹{pnl:.2f}")
+        
+        # Log comprehensive trade summary using account manager
+        self.account_manager.log_trade_summary(
+            entry_price=entry_price,
+            exit_price=exit_price,
+            lots=lots,
+            stop_loss=self.current_position['stop_loss'],
+            target=self.current_position['take_profit'],
+            reason=exit_reason
+        )
         
         # Clean up all state
         self.is_trading = False
@@ -352,6 +384,7 @@ class PositionManager:
         print(f"Trading Flag: {'✅ ACTIVE' if self.is_trading else '❌ INACTIVE'}")
         print(f"Active Orders: {len(self.active_orders)}")
         print(f"Current Position: {'✅ EXISTS' if self.current_position else '❌ NONE'}")
+        print(f"Account Balance: ₹{self.account_manager.get_current_balance():,.2f}")
         
         if self.active_orders:
             print(f"\nActive Orders Details:")
@@ -360,19 +393,24 @@ class PositionManager:
                 print(f"    Type: {order_info.get('type', 'UNKNOWN')}")
                 print(f"    Symbol: {order_info.get('symbol', 'UNKNOWN')}")
                 print(f"    Quantity: {order_info.get('quantity', 'UNKNOWN')}")
+                print(f"    Lots: {order_info.get('lots', 'UNKNOWN')}")
                 print(f"    Status: {order_info.get('status', 'UNKNOWN')}")
                 print(f"    Timestamp: {datetime.fromtimestamp(order_info.get('timestamp', 0)).strftime('%H:%M:%S')}")
                 
         if self.current_position:
             print(f"\nCurrent Position Details:")
-            print(f"  Entry Price: {self.current_position.get('entry_price', 'UNKNOWN'):.2f}")
-            print(f"  Stop Loss: {self.current_position.get('stop_loss', 'UNKNOWN'):.2f}")
-            print(f"  Take Profit: {self.current_position.get('take_profit', 'UNKNOWN'):.2f}")
+            print(f"  Entry Price: ₹{self.current_position.get('entry_price', 'UNKNOWN'):.2f}")
+            print(f"  Stop Loss: ₹{self.current_position.get('stop_loss', 'UNKNOWN'):.2f}")
+            print(f"  Take Profit: ₹{self.current_position.get('take_profit', 'UNKNOWN'):.2f}")
+            print(f"  Lots: {self.current_position.get('lots', 'UNKNOWN')}")
+            print(f"  Quantity: {self.current_position.get('quantity', 'UNKNOWN')}")
             print(f"  Risk:Reward: 1:{self.current_position.get('current_risk_reward', 'UNKNOWN'):.1f}")
             print(f"  Target Updated 50%: {'✅' if self.current_position.get('target_updated_50', False) else '❌'}")
             print(f"  Target Updated 100%: {'✅' if self.current_position.get('target_updated_100', False) else '❌'}")
-            print(f"  Max Price Reached: {self.current_position.get('max_price_reached', 'UNKNOWN'):.2f}")
+            print(f"  Max Price Reached: ₹{self.current_position.get('max_price_reached', 'UNKNOWN'):.2f}")
             print(f"  Trigger Type: {self.current_position.get('trigger_type', 'UNKNOWN')}")
+            print(f"  Actual SL Amount: ₹{self.current_position.get('actual_sl_amount', 'UNKNOWN'):.2f}")
+            print(f"  Max Loss per Lot: ₹{self.current_position.get('max_loss_per_lot', 'UNKNOWN'):.2f}")
             
         print(f"{'='*50}")
     
