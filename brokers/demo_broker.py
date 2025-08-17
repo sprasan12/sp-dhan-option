@@ -77,18 +77,9 @@ class DemoBroker:
                 order["filledQuantity"] = quantity
                 order["status"] = "FILLED"
                 
-                # Update virtual balance
-                order_value = order["filledPrice"] * quantity
-                if side == "BUY":
-                    self.virtual_balance -= order_value
-                    # Update account manager if available
-                    if self.account_manager:
-                        self.account_manager.update_balance(-order_value)
-                else:  # SELL
-                    self.virtual_balance += order_value
-                    # Update account manager if available
-                    if self.account_manager:
-                        self.account_manager.update_balance(order_value)
+                # For demo trading, we don't deduct balance on BUY orders
+                # The balance will be updated when the position is closed (SELL)
+                # This simulates margin trading where you don't need full cash upfront
                 
                 # Track position
                 self._update_position(order)
@@ -101,6 +92,7 @@ class DemoBroker:
             print(f"  Side: {side}")
             print(f"  Quantity: {quantity}")
             print(f"  Price: ₹{order['filledPrice']:.2f}")
+            print(f"  Order Value: ₹{order['filledPrice'] * quantity:.2f}")
             print(f"  Virtual Balance: ₹{self.get_account_balance():,.2f}")
             
             return {
@@ -152,6 +144,12 @@ class DemoBroker:
                 position["quantity"] -= quantity
                 position["totalValue"] = position["avgPrice"] * position["quantity"]
                 
+                # Update account balance with the P&L
+                if self.account_manager:
+                    self.account_manager.update_balance(pnl)
+                else:
+                    self.virtual_balance += pnl
+                
                 # Record trade
                 trade = {
                     "symbol": symbol,
@@ -165,6 +163,10 @@ class DemoBroker:
                 self.trade_history.append(trade)
                 
                 print(f"Demo Trade Closed: P&L = ₹{pnl:,.2f}")
+                print(f"  Entry Price: ₹{position['avgPrice']:.2f}")
+                print(f"  Exit Price: ₹{price:.2f}")
+                print(f"  Quantity: {quantity}")
+                print(f"  Updated Balance: ₹{self.get_account_balance():,.2f}")
                 
                 # If position is closed, remove it
                 if position["quantity"] == 0:
@@ -216,8 +218,11 @@ class DemoBroker:
             current_price = position["avgPrice"]  # Placeholder
             unrealized_pnl += (current_price - position["avgPrice"]) * position["quantity"]
         
+        # Use account manager balance if available
+        current_balance = self.get_account_balance()
+        
         return {
-            "virtualBalance": self.virtual_balance,
+            "virtualBalance": current_balance,
             "totalPnl": total_pnl,
             "unrealizedPnl": unrealized_pnl,
             "totalTrades": len(self.trade_history),
