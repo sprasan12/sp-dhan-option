@@ -81,56 +81,48 @@ class HistoricalDataFetcher:
                 print(f"Could not find security ID for symbol {symbol}")
                 return None
             
-            # Convert interval format to match API requirements
+            # Map interval to API format
             interval_map = {
                 "1min": "1",
                 "5min": "5", 
                 "15min": "15",
                 "30min": "30",
-                "1day": "1D"
+                "1hour": "60",
+                "1day": "D"
             }
+            
             api_interval = interval_map.get(interval, interval)
             
-            # Prepare request body (POST with JSON)
+            # Prepare request body
             request_body = {
-                "securityId": str(security_id),
+                "securityId": security_id,
                 "exchangeSegment": "NSE_FNO",
                 "instrument": "OPTIDX",
-                "fromDate": start_date.strftime("%Y-%m-%d 10:30:00"),  # Market open time
-                "toDate": end_date.strftime("%Y-%m-%d 16:00:00"),      # Market close time
+                "fromDate": start_date.strftime('%Y-%m-%d %H:%M:%S'),
+                "toDate": end_date.strftime('%Y-%m-%d %H:%M:%S'),
                 "interval": api_interval,
                 "oi": False
             }
             
-            headers = {
-                'access-token': self.access_token,
-                'Accept': 'application/json',
-                'Content-Type': 'application/json'
-            }
-            
-            print(f"Fetching historical data for {symbol} from {start_date.date()} to {end_date.date()}")
             print(f"Request body: {request_body}")
             
-            # Make API request (POST with JSON body)
-            response = requests.post(
-                f"{self.base_url}",
-                headers=headers,
-                json=request_body
-            )
+            headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'access-token': self.access_token
+            }
+            
+            response = requests.post(self.base_url, json=request_body, headers=headers)
             
             if response.status_code == 200:
                 data = response.json()
-                print(f"API Response type: {type(data)}")
-                
                 # Handle different response formats
                 if isinstance(data, list) and len(data) > 0:
                     # List of candles
                     df = pd.DataFrame(data)
-                    print(f"List of candles with {len(df)} records")
                 elif isinstance(data, dict) and 'data' in data and data['data']:
                     # Nested data structure
                     df = pd.DataFrame(data['data'])
-                    print(f"Nested data structure with {len(df)} records")
                 elif isinstance(data, dict) and all(key in data for key in ['open', 'high', 'low', 'close', 'volume', 'timestamp']):
                     # Check if values are arrays (separate arrays for each field)
                     if isinstance(data['open'], list) and isinstance(data['close'], list):
@@ -143,24 +135,15 @@ class HistoricalDataFetcher:
                             'volume': data['volume'],
                             'timestamp': data['timestamp']
                         })
-                        print(f"Separate arrays format with {len(df)} records")
                     else:
                         # Single candle object
                         df = pd.DataFrame([data])
-                        print(f"Single candle object converted to DataFrame")
                 else:
                     print("No historical data found")
-                    print(f"Response structure: {type(data)}")
-                    if isinstance(data, dict):
-                        print(f"Available keys: {list(data.keys())}")
                     return None
                 
-                # Convert timestamp to datetime with better error handling
+                # Convert timestamp to datetime
                 try:
-                    # First, let's see what we're working with
-                    sample_timestamps = df['timestamp'].head(3).tolist()
-                    print(f"Sample timestamp values before conversion: {sample_timestamps}")
-                    
                     # Try different parsing strategies
                     if df['timestamp'].dtype == 'object':
                         # Check if timestamps are Unix timestamps (numbers)
@@ -170,104 +153,65 @@ class HistoricalDataFetcher:
                             try:
                                 # Try as seconds first
                                 df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='s', utc=True)
-                                print("Converted timestamps as Unix seconds (UTC)")
                             except:
                                 try:
                                     # Try as milliseconds
                                     df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ms', utc=True)
-                                    print("Converted timestamps as Unix milliseconds (UTC)")
                                 except:
                                     # Try as nanoseconds
                                     df['timestamp'] = pd.to_datetime(df['timestamp'].astype(float), unit='ns', utc=True)
-                                    print("Converted timestamps as Unix nanoseconds (UTC)")
                         else:
                             # Try standard datetime parsing
                             df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce', utc=True)
-                            print("Converted timestamps using standard datetime parsing (UTC)")
                     else:
                         # Already numeric, try Unix timestamp conversion
                         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s', errors='coerce', utc=True)
-                        print("Converted numeric timestamps as Unix seconds (UTC)")
                     
                     # Convert UTC to IST (UTC+5:30)
                     df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Kolkata')
-                    print("Converted UTC timestamps to IST (Asia/Kolkata)")
                     
                     # Check if we have any invalid timestamps
                     invalid_timestamps = df['timestamp'].isna().sum()
                     if invalid_timestamps > 0:
-                        print(f"Warning: {invalid_timestamps} invalid timestamps found")
                         # Remove rows with invalid timestamps
                         df = df.dropna(subset=['timestamp'])
-                        print(f"Removed {invalid_timestamps} rows with invalid timestamps")
                     
                     # Check for timestamps that are too old (before 2000)
-                    # Create timezone-aware comparison timestamp
                     comparison_date = pd.Timestamp('2000-01-01').tz_localize('Asia/Kolkata')
                     old_timestamps = (df['timestamp'] < comparison_date).sum()
-                    if old_timestamps > 0:
-                        print(f"Warning: {old_timestamps} timestamps are before 2000, which might indicate parsing issues")
-                        print(f"Sample old timestamps: {df[df['timestamp'] < comparison_date]['timestamp'].head().tolist()}")
+                    if old_timestamps > 0 and old_timestamps == len(df):
+                        # If all timestamps are old, try alternative parsing
+                        if isinstance(data, dict) and 'timestamp' in data:
+                            raw_timestamps = data['timestamp']
+                        elif isinstance(data, list) and len(data) > 0:
+                            raw_timestamps = [item.get('timestamp') for item in data]
+                        else:
+                            raw_timestamps = df['timestamp'].tolist()
                         
-                        # If we have old timestamps, try alternative parsing
-                        if old_timestamps > 0 and old_timestamps == len(df):
-                            print("All timestamps are old, trying alternative parsing methods...")
-                            # Get the original raw timestamps
-                            if isinstance(data, dict) and 'timestamp' in data:
-                                raw_timestamps = data['timestamp']
-                            elif isinstance(data, list) and len(data) > 0:
-                                raw_timestamps = [item.get('timestamp') for item in data]
-                            else:
-                                raw_timestamps = df['timestamp'].tolist()
-                            
-                            # Try different units
-                            for unit in ['ms', 'us', 'ns']:
-                                try:
-                                    test_timestamp = pd.to_datetime(float(raw_timestamps[0]), unit=unit, utc=True)
-                                    if test_timestamp > pd.Timestamp('2000-01-01').tz_localize('UTC'):
-                                        print(f"Found working unit: {unit}")
-                                        df['timestamp'] = pd.to_datetime(raw_timestamps, unit=unit, utc=True)
-                                        # Convert UTC to IST
-                                        df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Kolkata')
-                                        print("Converted UTC timestamps to IST (Asia/Kolkata)")
-                                        break
-                                except:
-                                    continue
-                        
+                        # Try different units
+                        for unit in ['ms', 'us', 'ns']:
+                            try:
+                                test_timestamp = pd.to_datetime(float(raw_timestamps[0]), unit=unit, utc=True)
+                                if test_timestamp > pd.Timestamp('2000-01-01').tz_localize('UTC'):
+                                    df['timestamp'] = pd.to_datetime(raw_timestamps, unit=unit, utc=True)
+                                    df['timestamp'] = df['timestamp'].dt.tz_convert('Asia/Kolkata')
+                                    break
+                            except:
+                                continue
+                    
                 except Exception as e:
                     print(f"Error converting timestamps: {e}")
-                    print(f"Sample timestamp values: {df['timestamp'].head() if 'timestamp' in df.columns else 'No timestamp column'}")
                     return None
                 
                 # Sort by timestamp
                 df = df.sort_values('timestamp').reset_index(drop=True)
-                
-                print(f"Successfully fetched {len(df)} historical records")
-                print(f"Data columns: {list(df.columns)}")
-                print(f"First few records:")
-                print(df.head())
-                
-                # Debug timestamp information
-                if 'timestamp' in df.columns:
-                    print(f"\nTimestamp debugging:")
-                    print(f"Timestamp column type: {df['timestamp'].dtype}")
-                    print(f"First 5 raw timestamp values: {df['timestamp'].head().tolist()}")
-                    print(f"Timestamp range: {df['timestamp'].min()} to {df['timestamp'].max()}")
-                    
-                    # Show raw timestamp values before conversion
-                    print(f"Raw timestamp values (before pd.to_datetime):")
-                    if isinstance(data, dict) and 'timestamp' in data:
-                        print(f"Raw timestamp array: {data['timestamp'][:5] if isinstance(data['timestamp'], list) else data['timestamp']}")
-                    elif isinstance(data, list) and len(data) > 0:
-                        raw_timestamps = [item.get('timestamp', 'N/A') for item in data[:5]]
-                        print(f"Raw timestamp values: {raw_timestamps}")
                 return df
             else:
                 print(f"API request failed with status {response.status_code}: {response.text}")
                 return None
                 
         except Exception as e:
-            print(f"Error fetching historical data: {e}")
+            print(f"Error making API request: {e}")
             return None
     
     def fetch_15min_candles(self, symbol: str, instruments_df: pd.DataFrame, 
@@ -275,16 +219,6 @@ class HistoricalDataFetcher:
                            end_date: datetime = None) -> Optional[pd.DataFrame]:
         """
         Fetch 15-minute candles for live trading initialization
-        
-        Args:
-            symbol: Trading symbol
-            instruments_df: Instruments dataframe
-            days_back: Number of days to look back (used if start_date/end_date not provided)
-            start_date: Start date for historical data
-            end_date: End date for historical data
-        
-        Returns:
-            DataFrame with 15-minute candles or None if failed
         """
         if start_date is None or end_date is None:
             # Use days_back parameter

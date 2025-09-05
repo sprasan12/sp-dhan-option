@@ -11,11 +11,12 @@ from utils.market_utils import get_market_boundary_time, round_to_tick
 class CandleStrategy:
     """15-minute candle strategy with 1-minute sweep detection"""
     
-    def __init__(self, tick_size=0.05, swing_look_back=2, logger=None, exit_callback=None):
+    def __init__(self, tick_size=0.05, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None):
         self.tick_size = tick_size
         self.swing_look_back = swing_look_back
         self.logger = logger
         self.exit_callback = exit_callback  # Callback to notify when trade exits
+        self.entry_callback = entry_callback  # Callback to notify when trade entry is triggered
         
         # Strategy parameters
         self.fifteen_min_candles = deque(maxlen=50)  # Store 15-minute candles
@@ -34,7 +35,17 @@ class CandleStrategy:
         self.entry_price = None
         self.current_stop_loss = None
         self.current_target = None
+        self.initial_stop_loss = None  # Store initial SL for RR calculations
+        self.initial_target = None     # Store initial target for profit level checks
         self.swing_lows = deque(maxlen=50)  # Track swing lows for SL movement
+        
+        # Target movement tracking
+        self.target_moved_to_rr4 = False  # Track if target moved to RR=4
+        self.target_removed = False       # Track if target removed for trailing
+        
+        # Target invalidation tracking
+        self.target_invalidation_count = 0  # Count total 15m candles closing below target (not necessarily consecutive)
+        self.last_target_invalidation_time = None  # Track when target was last invalidated
     
     def update_15min_candle(self, price, timestamp):
         """Update or create a new 15-minute candle"""
@@ -379,6 +390,19 @@ class CandleStrategy:
             # For bull candles, don't reset target - keep existing target active
             target_str = f"{self.sweep_low:.2f}" if self.sweep_low is not None else "None"
             print(f"📈 Bull candle - keeping existing target: {target_str}")
+        
+        # Check for 15m FVG and invalidate target regardless of invalidation count
+        if self.waiting_for_sweep and self.sweep_low:
+            fvg_15min = self.detect_15min_bullish_fvg()
+            if fvg_15min:
+                print(f"❌ Target invalidated! 15m FVG detected")
+                print(f"🔄 Setting new target: {candle.low:.2f}")
+                self.sweep_low = candle.low
+                self.sweep_detected = False  # Reset sweep detection for new target
+                self.recovery_low = None  # Reset recovery low
+                self.waiting_for_sweep = True
+                self.target_invalidation_count = 0  # Reset counter
+                self.last_target_invalidation_time = candle.timestamp
     
     def check_sweep_conditions(self, one_min_candle):
         """Check if 1-minute candle sweeps the low and look for IMPS/CISD"""
@@ -478,6 +502,42 @@ class CandleStrategy:
             return fvg
         else:
             print(f"   ❌ No FVG - C3.low ({c3.low:.2f}) <= C1.high ({c1.high:.2f})")
+        
+        return None
+    
+    def detect_15min_bullish_fvg(self):
+        """Detect 15-minute bullish Fair Value Gap"""
+        if len(self.fifteen_min_candles) < 3:
+            print(f"DEBUG: Not enough 15min candles for FVG: {len(self.fifteen_min_candles)}")
+            return None
+        
+        # Get the last 3 15-minute candles
+        c1, c2, c3 = list(self.fifteen_min_candles)[-3:]
+        print(f"DEBUG: 15min FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
+        print(f"DEBUG: 15min FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
+        print(f"DEBUG: 15min FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
+        print(f"DEBUG: 15min FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
+        
+        # Check for bullish FVG (c3.low > c1.high)
+        if c3.low > c1.high:
+            gap_size = c3.low - c1.high
+            fvg = {
+                'type': '15min_bullish',
+                'gap_size': gap_size,
+                'entry': c3.close,
+                'stop_loss': c3.low,  # Stop loss is the low of the third candle
+                'candles': [c1, c2, c3]
+            }
+            
+            if self.logger:
+                self.logger.log_fvg_detection(gap_size, c3.close, c3.low, [c1, c2, c3])
+            else:
+                print(f"   15min FVG Gap Size: {gap_size:.2f}")
+                print(f"   Stop Loss (C3 Low): {c3.low:.2f}")
+            
+            return fvg
+        else:
+            print(f"   ❌ No 15min FVG - C3.low ({c3.low:.2f}) <= C1.high ({c1.high:.2f})")
         
         return None
     

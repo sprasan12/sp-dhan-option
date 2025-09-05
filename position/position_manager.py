@@ -144,7 +144,6 @@ class PositionManager:
                 side="BUY",
                 target_price=take_profit,
                 stop_loss_price=stop_loss,
-                trailing_jump=round_to_tick(float(risk/2), self.tick_size),
                 instruments_df=instruments_df
             )
             
@@ -280,13 +279,13 @@ class PositionManager:
             return
         
         if new_stop_loss > self.current_position['stop_loss']:
-            # Update the stop loss using modify_target
+            # Update the stop loss using modify_stop_loss
             print(f"\n=== UPDATING TRAILING STOP ===")
             print(f"Old Stop Loss: ₹{self.current_position['stop_loss']:.2f}")
             print(f"New Stop Loss: ₹{new_stop_loss:.2f}")
             
             # Modify the existing order with new stop loss
-            modify_response = self.broker.modify_target(
+            modify_response = self.broker.modify_stop_loss(
                 self.current_position['buy_order_id'],
                 new_stop_loss
             )
@@ -335,50 +334,45 @@ class PositionManager:
         return True
     
     def close_position(self, symbol):
-        """Close the current position"""
-        if not self.is_trading or not self.current_position:
-            return False
-        
+        """Close a specific position by symbol"""
         try:
-            quantity = self.current_position['quantity']
-            order_id = self.current_position.get('buy_order_id')
+            # Get current positions
+            positions = self.broker.get_positions()
             
-            print(f"\n=== CLOSING POSITION ===")
-            print(f"Active Orders before closing: {len(self.active_orders)}")
+            if symbol not in positions:
+                print(f"No position found for symbol: {symbol}")
+                return False
             
-            # Cancel the existing order
-            if order_id:
-                cancel_order = self.broker.cancel_order(order_id)
-                if cancel_order:
-                    print(f"✅ Buy order cancelled: {order_id}")
-                    # Remove from active orders tracking
-                    if order_id in self.active_orders:
-                        del self.active_orders[order_id]
-                else:
-                    print(f"❌ Failed to cancel buy order: {order_id}")
+            position = positions[symbol]
+            quantity = position['quantity']
             
-            # Place market sell order to close position
-            order = self.broker.place_order(symbol, quantity, "MARKET", "SELL")
-            if order:
-                print("✅ Position closed successfully")
-                print(f"Exit Order ID: {order.get('orderId')}")
-                
-                # Clean up all state
-                self.is_trading = False
-                self.current_position = None
-                self.active_orders.clear()
-                print(f"✅ All state cleaned up. Active Orders: {len(self.active_orders)}")
+            if quantity == 0:
+                print(f"No quantity to close for symbol: {symbol}")
+                return False
+            
+            # Determine side (BUY to close SELL position, SELL to close BUY position)
+            side = "SELL" if position['side'] == "BUY" else "BUY"
+            
+            print(f"Closing position: {symbol} - {quantity} qty @ {side}")
+            
+            # Place closing order
+            order_result = self.broker.place_order(
+                symbol=symbol,
+                quantity=abs(quantity),
+                order_type="MARKET",
+                side=side,
+                instruments_df=getattr(self.broker, 'instruments_df', None)
+            )
+            
+            if order_result:
+                print(f"✅ Position close order placed successfully: {symbol}")
                 return True
             else:
-                print("❌ Failed to place exit order")
+                print(f"❌ Failed to place position close order: {symbol}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error closing position: {e}")
-            # Force cleanup on error
-            self.is_trading = False
-            self.current_position = None
-            self.active_orders.clear()
+            print(f"Error closing position {symbol}: {e}")
             return False
     
     def display_order_status(self):

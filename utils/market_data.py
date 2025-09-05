@@ -8,6 +8,7 @@ import time
 import websocket
 import threading
 from datetime import datetime
+import pytz
 
 class MarketDataWebSocket:
     """WebSocket handler for market data"""
@@ -125,6 +126,10 @@ def process_ticker_data(data, security_id, callback):
             print(f"Invalid ticker packet length: {len(data)}")
             return
             
+        # Check message type - only process ticker data (\x02)
+        if len(data) > 0 and data[0] != 0x02:
+            return
+            
         # Extract LTP and LTT from payload (after 8-byte header)
         payload = data[8:]
         if len(payload) >= 8:
@@ -135,8 +140,8 @@ def process_ticker_data(data, security_id, callback):
             # Convert using little-endian (as per Dhan docs)
             ltp = struct.unpack('<f', ltp_bytes)[0]
             
-            # Use current system time instead of WebSocket timestamp
-            timestamp = datetime.now()
+            # Use current system time with timezone awareness
+            timestamp = datetime.now(pytz.timezone('Asia/Kolkata'))
             
             # Print LTP with timestamp
             print(f"LTP: {ltp:.2f} | Time: {timestamp.strftime('%H:%M:%S')}")

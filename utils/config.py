@@ -22,25 +22,26 @@ class TradingConfig:
         
         # Common settings
         self.tick_size = float(os.getenv('TICK_SIZE', 0.05))
-        self.max_15min_candles = int(os.getenv('MAX_15MIN_CANDLES', 30))
+        #self.max_15min_candles = int(os.getenv('MAX_15MIN_CANDLES', 30))
         self.quantity = int(os.getenv('TRADING_QUANTITY', 1))  # Number of lots/quantity to trade
         
         # Account management settings
         self.account_start_balance = float(os.getenv('ACCT_START_BALANCE', 50000))  # Starting balance in INR
         self.fixed_sl_percentage = float(os.getenv('FIXED_SL_PERCENTAGE', 10.0))  # Fixed SL as percentage of account balance
         self.lot_size = int(os.getenv('LOT_SIZE', 75))  # Quantity per lot
-        self.max_sl_percentage_of_price = float(os.getenv('MAX_SL_PERCENTAGE_OF_PRICE', 15.0))  # Max SL as percentage of market price
+        self.max_sl_percentage_of_price = float(os.getenv('MAX_SL_PERCENTAGE_OF_PRICE', 25.0))  # Max SL as percentage of market price
         
         # Live trading settings
         self.client_id = os.getenv('DHAN_CLIENT_ID')
         self.access_token = os.getenv('DHAN_ACCESS_TOKEN')
         
         # Demo trading settings
-        self.demo_start_date = os.getenv('DEMO_START_DATE', '2024-12-15')  # Recent past date
+        self.demo_start_date = os.getenv('DEMO_START_DATE', '2025-08-11')  # Recent past date
         self.demo_symbol = os.getenv('DEMO_SYMBOL', 'NIFTY 21 AUG 24700 CALL')  # Updated symbol format
         self.demo_interval_minutes = int(os.getenv('DEMO_INTERVAL_MINUTES', 1))
         self.demo_server_port = int(os.getenv('DEMO_SERVER_PORT', 8080))
         self.demo_stream_interval_seconds = float(os.getenv('DEMO_STREAM_INTERVAL_SECONDS', 5.0))  # How fast to stream data
+        self.demo_15min_candles_back = int(os.getenv('DEMO_15MIN_CANDLES_BACK', 1))  # Number of 15-min candles to fetch for initialization
         
         # Historical data settings
         self.historical_data_days = int(os.getenv('HISTORICAL_DATA_DAYS', 7))
@@ -62,8 +63,10 @@ class TradingConfig:
         return self.mode == TradingMode.DEMO
     
     def get_demo_start_datetime(self):
-        """Get demo start datetime"""
-        return datetime.strptime(self.demo_start_date, '%Y-%m-%d')
+        """Get demo start datetime with a specific time during market hours"""
+        base_datetime = datetime.strptime(self.demo_start_date, '%Y-%m-%d')
+        # Set to 10:30 AM (during market hours) so we can properly calculate previous 15-min candle
+        return base_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
     
     def get_fixed_sl_amount(self):
         """Get fixed SL amount in INR"""
@@ -98,7 +101,6 @@ class TradingConfig:
         print(f"\n=== Trading Bot Configuration ===")
         print(f"Mode: {self.mode.value.upper()}")
         print(f"Tick Size: {self.tick_size}")
-        print(f"Max 15-min Candles: {self.max_15min_candles}")
         print(f"Trading Quantity: {self.quantity}")
         print(f"Account Start Balance: ₹{self.account_start_balance:,.2f}")
         print(f"Fixed SL Amount: ₹{self.get_fixed_sl_amount():,.2f} ({self.fixed_sl_percentage}% of balance)")
@@ -119,6 +121,7 @@ class TradingConfig:
             print(f"Demo Interval: {self.demo_interval_minutes} minutes")
             print(f"Demo Server Port: {self.demo_server_port}")
             print(f"Demo Stream Speed: {self.demo_stream_interval_seconds} seconds per candle")
+            print(f"Demo 15-min Candles Back: {self.demo_15min_candles_back}")
             print(f"Historical Data Days: {self.historical_data_days}")
         
         print("=" * 35)

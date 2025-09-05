@@ -102,7 +102,7 @@ DualModeTradingBot/
    TRADING_SYMBOL=NIFTY24JAN19000CE
    
    # Demo Settings
-   DEMO_START_DATE=2024-12-15  # Set to recent date for demo trading
+   DEMO_START_DATE=2025-08-08  # Set to recent date for demo trading
    DEMO_INTERVAL_MINUTES=1
    DEMO_STREAM_INTERVAL_SECONDS=1.0  # How fast to stream each candle (lower = faster backtesting)
    DEMO_SERVER_PORT=8080

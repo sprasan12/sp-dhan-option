@@ -152,6 +152,18 @@ class TradingLogger:
         self.info(f"   Reason: {reason}")
         self.info("-" * 50)
     
+    def log_target_movement(self, old_target, new_target, reason):
+        """Log target movement"""
+        self.info("🎯 TARGET MOVED")
+        if old_target:
+            self.info(f"   Old Target: {old_target:.2f}")
+        if new_target:
+            self.info(f"   New Target: {new_target:.2f}")
+        else:
+            self.info(f"   Target Removed - Trailing Mode")
+        self.info(f"   Reason: {reason}")
+        self.info("-" * 50)
+    
     def log_swing_low_detection(self, price, timestamp):
         """Log swing low detection"""
         self.info(f"📉 Swing Low: {price:.2f} at {timestamp.strftime('%H:%M:%S')}")
