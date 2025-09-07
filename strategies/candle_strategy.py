@@ -7,6 +7,7 @@ from collections import deque
 from datetime import timedelta
 from models.candle import Candle
 from utils.market_utils import get_market_boundary_time, round_to_tick
+from utils.timezone_utils import safe_datetime_compare, ensure_timezone_naive
 
 class CandleStrategy:
     """15-minute candle strategy with 1-minute sweep detection"""
@@ -22,6 +23,7 @@ class CandleStrategy:
         self.fifteen_min_candles = deque(maxlen=50)  # Store 15-minute candles
         self.one_min_candles = deque(maxlen=100)     # Store 1-minute candles for sweep detection
         self.current_15min_candle = None
+        self.current_5min_candle = None
         self.current_1min_candle = None
         self.sweep_detected = False
         self.sweep_low = None
@@ -69,7 +71,10 @@ class CandleStrategy:
         period_number = minutes_since_market_open // 15
         
         # Debug period calculation
-        print(f"DEBUG: Period calc - hour:{current_time.hour}, minute:{current_time.minute}, minutes_since_open:{minutes_since_market_open}, period:{period_number}")
+        if self.logger:
+            self.logger.debug(f"Period calc - hour:{current_time.hour}, minute:{current_time.minute}, minutes_since_open:{minutes_since_market_open}, period:{period_number}")
+        else:
+            print(f"DEBUG: Period calc - hour:{current_time.hour}, minute:{current_time.minute}, minutes_since_open:{minutes_since_market_open}, period:{period_number}")
         
         # Calculate the start time of this 15-minute period
         period_start_minutes = period_number * 15
@@ -79,15 +84,34 @@ class CandleStrategy:
         candle_start_time = market_open_time + timedelta(minutes=period_start_minutes)
         
         # Debug: Print time calculations
-        print(f"DEBUG: Current time: {current_time}, Period: {period_number}, Candle start: {candle_start_time}")
+        if self.logger:
+            self.logger.debug(f"Current time: {current_time}, Period: {period_number}, Candle start: {candle_start_time}")
+        else:
+            print(f"DEBUG: Current time: {current_time}, Period: {period_number}, Candle start: {candle_start_time}")
         if self.current_15min_candle:
-            print(f"DEBUG: Current candle timestamp: {self.current_15min_candle.timestamp}")
-            print(f"DEBUG: Timestamps match: {self.current_15min_candle.timestamp == candle_start_time}")
-            print(f"DEBUG: Current 15min candle - O:{self.current_15min_candle.open:.2f} H:{self.current_15min_candle.high:.2f} L:{self.current_15min_candle.low:.2f} C:{self.current_15min_candle.close:.2f}")
-        print(f"DEBUG: New price: {price:.2f}")
+            # Use safe datetime comparison
+            timestamp_match = safe_datetime_compare(self.current_15min_candle.timestamp, candle_start_time, "eq")
+            
+            if self.logger:
+                self.logger.debug(f"Current candle timestamp: {self.current_15min_candle.timestamp}")
+                self.logger.debug(f"Timestamps match: {timestamp_match}")
+                self.logger.debug(f"Current 15min candle - O:{self.current_15min_candle.open:.2f} H:{self.current_15min_candle.high:.2f} L:{self.current_15min_candle.low:.2f} C:{self.current_15min_candle.close:.2f}")
+            else:
+                print(f"DEBUG: Current candle timestamp: {self.current_15min_candle.timestamp}")
+                print(f"DEBUG: Timestamps match: {timestamp_match}")
+                print(f"DEBUG: Current 15min candle - O:{self.current_15min_candle.open:.2f} H:{self.current_15min_candle.high:.2f} L:{self.current_15min_candle.low:.2f} C:{self.current_15min_candle.close:.2f}")
+        if self.logger:
+            self.logger.debug(f"New price: {price:.2f}")
+        else:
+            print(f"DEBUG: New price: {price:.2f}")
         
         # If this is a new 15-minute candle period, create a new candle
-        if not self.current_15min_candle or self.current_15min_candle.timestamp != candle_start_time:
+        # Use safe datetime comparison
+        timestamp_match = False
+        if self.current_15min_candle:
+            timestamp_match = safe_datetime_compare(self.current_15min_candle.timestamp, candle_start_time, "eq")
+        
+        if not self.current_15min_candle or not timestamp_match:
             # Save the previous 15-minute candle if it exists
             if self.current_15min_candle:
                 self.fifteen_min_candles.append(self.current_15min_candle)
@@ -146,7 +170,12 @@ class CandleStrategy:
         candle_start_time = market_open_time + timedelta(minutes=period_start_minutes)
         
         # If this is a new 15-minute candle period, create a new candle
-        if not self.current_15min_candle or self.current_15min_candle.timestamp != candle_start_time:
+        # Use safe datetime comparison
+        timestamp_match = False
+        if self.current_15min_candle:
+            timestamp_match = safe_datetime_compare(self.current_15min_candle.timestamp, candle_start_time, "eq")
+        
+        if not self.current_15min_candle or not timestamp_match:
             # Save the previous 15-minute candle if it exists
             if self.current_15min_candle:
                 self.fifteen_min_candles.append(self.current_15min_candle)
@@ -182,6 +211,77 @@ class CandleStrategy:
             if self.waiting_for_sweep and self.sweep_low and self.current_15min_candle.close < self.sweep_low:
                 print(f"⚠️  Target invalidation check: Current close ({self.current_15min_candle.close:.2f}) < Target ({self.sweep_low:.2f})")
                 print(f"🔄 Target will be invalidated when this 15-min candle completes")
+
+    def update_5min_candle_from_1min(self, one_min_candle):
+        """Update 5-minute candle with 1-minute candle data (for proper OHLC aggregation)"""
+        if not one_min_candle:
+            return
+
+        # Get the 5-minute period for this 1-minute candle
+        current_time = one_min_candle.timestamp
+
+        # Check if market is open (after 9:15 AM)
+        if current_time.hour < 9 or (current_time.hour == 9 and current_time.minute < 5):
+            return
+
+        # Calculate the current 5-minute period
+        minutes_since_market_open = (current_time.hour - 9) * 60 + (current_time.minute - 5)
+        period_number = minutes_since_market_open // 5
+
+        # Calculate the start time of this 5-minute period
+        period_start_minutes = period_number * 5
+        market_open_time = current_time.replace(hour=9, minute=15, second=0, microsecond=0)
+        candle_start_time = market_open_time + timedelta(minutes=period_start_minutes)
+
+        # If this is a new 5-minute candle period, create a new candle
+        # Use safe datetime comparison
+        timestamp_match = False
+        if self.current_5min_candle:
+            timestamp_match = safe_datetime_compare(self.current_15min_candle.timestamp, candle_start_time, "eq")
+
+        if not self.current_5min_candle or not timestamp_match:
+            # Save the previous 5-minute candle if it exists
+            if self.current_5min_candle:
+                self.fifteen_min_candles.append(self.current_5min_candle)
+                self.classify_and_analyze_15min_candle(self.current_5min_candle)
+
+                if self.logger:
+                    self.logger.log_5min_candle_completion(self.current_5min_candle)
+                else:
+                    print(f"\n🕯️ 5-Min Candle Completed: {self.current_5min_candle}")
+                    print(
+                        f"   Body: {self.current_5min_candle.body_size():.2f} ({self.current_5min_candle.body_percentage():.1f}%)")
+                    print(f"   Type: {self.get_candle_type(self.current_5min_candle)}")
+
+            # Create new 5-minute candle with 1-minute candle data
+            self.current_5min_candle = Candle(candle_start_time, one_min_candle.open, one_min_candle.high,
+                                               one_min_candle.low, one_min_candle.close)
+            print(
+                f"🕯️ New 5-Min Candle Started: O:{one_min_candle.open:.2f} H:{one_min_candle.high:.2f} L:{one_min_candle.low:.2f} C:{one_min_candle.close:.2f} | Time: {candle_start_time.strftime('%H:%M')}")
+        else:
+            # Update existing 5-minute candle with 1-minute candle data
+            old_low = self.current_5min_candle.low
+            old_high = self.current_5min_candle.high
+            self.current_5min_candle.high = max(self.current_5min_candle.high, one_min_candle.high)
+            self.current_5min_candle.low = min(self.current_5min_candle.low, one_min_candle.low)
+            self.current_5min_candle.close = one_min_candle.close
+
+            # Print if low or high changed
+            if self.current_5min_candle.low < old_low:
+                print(
+                    f"📉 5-Min Low Updated from 1min: {candle_start_time.strftime('%H:%M:%S')} - Old Low: {old_low:.2f} → New Low: {self.current_5min_candle.low:.2f} (1min Low: {one_min_candle.low:.2f})")
+            elif self.current_5min_candle.high > old_high:
+                print(
+                    f"📈 5-Min High Updated from 1min: {candle_start_time.strftime('%H:%M:%S')} - Old High: {old_high:.2f} → New High: {self.current_5min_candle.high:.2f} (1min High: {one_min_candle.high:.2f})")
+            else:
+                print(
+                    f"📊 5-Min Update from 1min: {candle_start_time.strftime('%H:%M:%S')} - H:{self.current_5min_candle.high:.2f} L:{self.current_5min_candle.low:.2f} C:{self.current_15min_candle.close:.2f}")
+
+            # Check for target invalidation during 5-minute candle formation
+            if self.waiting_for_sweep and self.sweep_low and self.current_5min_candle.close < self.sweep_low:
+                print(
+                    f"⚠️  Target invalidation check: Current close ({self.current_5min_candle.close:.2f}) < Target ({self.sweep_low:.2f})")
+                print(f"🔄 Target will be invalidated when this 5-min candle completes")
     
     def update_1min_candle(self, price, timestamp):
         """Update or create a new 1-minute candle for sweep detection (live mode)"""
@@ -208,7 +308,12 @@ class CandleStrategy:
         candle_start_time = market_open_time + timedelta(minutes=period_start_minutes)
         
         # If this is a new 1-minute candle period, create a new candle
-        if not self.current_1min_candle or self.current_1min_candle.timestamp != candle_start_time:
+        # Use safe datetime comparison
+        timestamp_match = False
+        if self.current_1min_candle:
+            timestamp_match = safe_datetime_compare(self.current_1min_candle.timestamp, candle_start_time, "eq")
+        
+        if not self.current_1min_candle or not timestamp_match:
             # Save the previous 1-minute candle if it exists
             if self.current_1min_candle:
                 self.one_min_candles.append(self.current_1min_candle)
@@ -226,7 +331,16 @@ class CandleStrategy:
                     self.update_swing_lows()
                 else:
                     # Only check sweep conditions if not in trade
-                    self.check_sweep_conditions(self.current_1min_candle)
+                    trigger = self.check_sweep_conditions(self.current_1min_candle)
+                    if trigger:
+                        if self.logger:
+                            self.logger.info(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                        else:
+                            print(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                        self.enter_trade(trigger['entry'], trigger['stop_loss'], trigger['target'])
+                        # Call entry callback if set
+                        if self.entry_callback:
+                            self.entry_callback(trigger)
             
             # Create new 1-minute candle
             self.current_1min_candle = Candle(candle_start_time, price, price, price, price)
@@ -289,7 +403,12 @@ class CandleStrategy:
         candle_start_time = market_open_time + timedelta(minutes=period_start_minutes)
         
         # If this is a new 1-minute candle period, create a new candle
-        if not self.current_1min_candle or self.current_1min_candle.timestamp != candle_start_time:
+        # Use safe datetime comparison
+        timestamp_match = False
+        if self.current_1min_candle:
+            timestamp_match = safe_datetime_compare(self.current_1min_candle.timestamp, candle_start_time, "eq")
+        
+        if not self.current_1min_candle or not timestamp_match:
             # Save the previous 1-minute candle if it exists
             if self.current_1min_candle:
                 self.one_min_candles.append(self.current_1min_candle)
@@ -307,7 +426,16 @@ class CandleStrategy:
                     self.update_swing_lows()
                 else:
                     # Only check sweep conditions if not in trade
-                    self.check_sweep_conditions(self.current_1min_candle)
+                    trigger = self.check_sweep_conditions(self.current_1min_candle)
+                    if trigger:
+                        if self.logger:
+                            self.logger.info(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                        else:
+                            print(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                        self.enter_trade(trigger['entry'], trigger['stop_loss'], trigger['target'])
+                        # Call entry callback if set
+                        if self.entry_callback:
+                            self.entry_callback(trigger)
             
             # Create new 1-minute candle with complete OHLC data
             self.current_1min_candle = Candle(candle_start_time, open_price, high_price, low_price, close_price)
@@ -414,7 +542,10 @@ class CandleStrategy:
             return None
         
         # Debug sweep checking
-        print(f"DEBUG: Checking sweep - 1min low: {one_min_candle.low:.2f}, target: {self.sweep_low:.2f}, sweep: {one_min_candle.low < self.sweep_low}")
+        if self.logger:
+            self.logger.debug(f"Checking sweep - 1min low: {one_min_candle.low:.2f}, target: {self.sweep_low:.2f}, sweep: {one_min_candle.low < self.sweep_low}")
+        else:
+            self.logger.info(f"Checking sweep - 1min low: {one_min_candle.low:.2f}, target: {self.sweep_low:.2f}, sweep: {one_min_candle.low < self.sweep_low}")
         
         # Check if this 1-minute candle sweeps the low
         if one_min_candle.low < self.sweep_low:
@@ -433,90 +564,134 @@ class CandleStrategy:
                         self.sweep_low, one_min_candle.low, self.recovery_low, one_min_candle.timestamp, candle_data
                     )
                 else:
-                    print(f"\n🎯 SWEEP DETECTED!")
-                    print(f"   1-Min Candle Low: {one_min_candle.low:.2f}")
-                    print(f"   Target Low: {self.sweep_low:.2f}")
-                    print(f"   Recovery Low: {self.recovery_low:.2f}")
-                    print(f"   Sweep Time: {one_min_candle.timestamp.strftime('%H:%M:%S')}")
-                    print(f"   🔍 Looking for IMPS/CISD...")
+                    self.logger.info(f"🎯 SWEEP DETECTED!")
+                    self.logger.info(f"   1-Min Candle Low: {one_min_candle.low:.2f}")
+                    self.logger.info(f"   Target Low: {self.sweep_low:.2f}")
+                    self.logger.info(f"   Recovery Low: {self.recovery_low:.2f}")
+                    self.logger.info(f"   Sweep Time: {one_min_candle.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   🔍 Looking for IMPS/CISD...")
             else:
                 # Update recovery low if this candle goes lower
                 if one_min_candle.low < self.recovery_low:
                     self.recovery_low = one_min_candle.low
-                    print(f"📉 Recovery Low Updated: {one_min_candle.low:.2f}")
+                    if self.logger:
+                        self.logger.info(f"📉 Recovery Low Updated: {one_min_candle.low:.2f}")
+                    else:
+                        print(f"📉 Recovery Low Updated: {one_min_candle.low:.2f}")
         
         # Look for IMPS/CISD if we have detected a sweep and close >= recovery low
         if self.sweep_detected and one_min_candle.close >= self.recovery_low:
-            print(f"🔍 Checking for IMPS/CISD - Close: {one_min_candle.close:.2f} >= Recovery Low: {self.recovery_low:.2f}")
+            if self.logger:
+                self.logger.info(f"🔍 Checking for IMPS/CISD - Close: {one_min_candle.close:.2f} >= Recovery Low: {self.recovery_low:.2f}")
+            else:
+                print(f"🔍 Checking for IMPS/CISD - Close: {one_min_candle.close:.2f} >= Recovery Low: {self.recovery_low:.2f}")
             
             # Look for IMPS (1-minute bullish FVG)
             imps_fvg = self.detect_1min_bullish_fvg()
             if imps_fvg:
-                print(f"✅ IMPS (1-Min Bullish FVG) Found!")
-                print(f"   Entry: {imps_fvg['entry']:.2f}")
-                print(f"   Stop Loss: {imps_fvg['stop_loss']:.2f}")
+                if self.logger:
+                    self.logger.info(f"✅ IMPS (1-Min Bullish FVG) Found!")
+                    self.logger.info(f"   Entry: {imps_fvg['entry']:.2f}")
+                    self.logger.info(f"   Stop Loss: {imps_fvg['stop_loss']:.2f}")
+                else:
+                    print(f"✅ IMPS (1-Min Bullish FVG) Found!")
+                    print(f"   Entry: {imps_fvg['entry']:.2f}")
+                    print(f"   Stop Loss: {imps_fvg['stop_loss']:.2f}")
                 return imps_fvg
             
             # Look for CISD (passing open of bear candles)
             cisd_trigger = self.detect_cisd()
             if cisd_trigger:
-                print(f"✅ CISD (Bear Candle Open) Found!")
-                print(f"   Entry: {cisd_trigger['entry']:.2f}")
-                print(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
+                if self.logger:
+                    self.logger.info(f"✅ CISD (Bear Candle Open) Found!")
+                    self.logger.info(f"   Entry: {cisd_trigger['entry']:.2f}")
+                    self.logger.info(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
+                else:
+                    print(f"✅ CISD (Bear Candle Open) Found!")
+                    print(f"   Entry: {cisd_trigger['entry']:.2f}")
+                    print(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
                 return cisd_trigger
         elif self.sweep_detected:
-            print(f"   ⏳ Waiting for close >= recovery low ({self.recovery_low:.2f}). Current close: {one_min_candle.close:.2f}")
+            if self.logger:
+                self.logger.info(f"   ⏳ Waiting for close >= recovery low ({self.recovery_low:.2f}). Current close: {one_min_candle.close:.2f}")
+            else:
+                print(f"   ⏳ Waiting for close >= recovery low ({self.recovery_low:.2f}). Current close: {one_min_candle.close:.2f}")
         
         return None
     
     def detect_1min_bullish_fvg(self):
         """Detect 1-minute bullish Fair Value Gap"""
         if len(self.one_min_candles) < 3:
-            print(f"DEBUG: Not enough 1min candles for FVG: {len(self.one_min_candles)}")
+            if self.logger:
+                self.logger.debug(f"Not enough 1min candles for FVG: {len(self.one_min_candles)}")
+            else:
+                self.logger.info(f"Not enough 1min candles for FVG: {len(self.one_min_candles)}")
             return None
         
         # Get the last 3 1-minute candles
         c1, c2, c3 = list(self.one_min_candles)[-3:]
-        print(f"DEBUG: FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
-        print(f"DEBUG: FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
-        print(f"DEBUG: FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
-        print(f"DEBUG: FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
+        if self.logger:
+            self.logger.debug(f"FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
+            self.logger.debug(f"FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
+            self.logger.debug(f"FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
+            self.logger.debug(f"FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
+        else:
+            self.logger.info(f"FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
+            self.logger.info(f"FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
+            self.logger.info(f"FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
+            self.logger.info(f"FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
         
         # Check for bullish FVG (c3.low > c1.high)
         if c3.low > c1.high:
             gap_size = c3.low - c1.high
+            # Calculate target (entry + 2x gap size for 1:2 RR)
+            target = c3.close + (2 * gap_size)
+            
             fvg = {
                 'type': 'bullish',
                 'gap_size': gap_size,
                 'entry': c3.close,
                 'stop_loss': self.recovery_low,  # Stop loss is the lowest point (recovery low)
+                'target': target,
                 'candles': [c1, c2, c3]
             }
             
             if self.logger:
                 self.logger.log_fvg_detection(gap_size, c3.close, self.recovery_low, [c1, c2, c3])
             else:
-                print(f"   FVG Gap Size: {gap_size:.2f}")
-                print(f"   Stop Loss (Recovery Low): {self.recovery_low:.2f}")
+                self.logger.info(f"   FVG Gap Size: {gap_size:.2f}")
+                self.logger.info(f"   Stop Loss (Recovery Low): {self.recovery_low:.2f}")
             
             return fvg
         else:
-            print(f"   ❌ No FVG - C3.low ({c3.low:.2f}) <= C1.high ({c1.high:.2f})")
+            if self.logger:
+                self.logger.debug(f"   ❌ No FVG - C3.low ({c3.low:.2f}) <= C1.high ({c1.high:.2f})")
+            else:
+                print(f"   ❌ No FVG - C3.low ({c3.low:.2f}) <= C1.high ({c1.high:.2f})")
         
         return None
     
     def detect_15min_bullish_fvg(self):
         """Detect 15-minute bullish Fair Value Gap"""
         if len(self.fifteen_min_candles) < 3:
-            print(f"DEBUG: Not enough 15min candles for FVG: {len(self.fifteen_min_candles)}")
+            if self.logger:
+                self.logger.debug(f"Not enough 15min candles for FVG: {len(self.fifteen_min_candles)}")
+            else:
+                self.logger.info(f"Not enough 15min candles for FVG: {len(self.fifteen_min_candles)}")
             return None
         
         # Get the last 3 15-minute candles
         c1, c2, c3 = list(self.fifteen_min_candles)[-3:]
-        print(f"DEBUG: 15min FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
-        print(f"DEBUG: 15min FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
-        print(f"DEBUG: 15min FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
-        print(f"DEBUG: 15min FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
+        if self.logger:
+            self.logger.debug(f"15min FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
+            self.logger.debug(f"15min FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
+            self.logger.debug(f"15min FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
+            self.logger.debug(f"15min FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
+        else:
+            self.logger.info(f"15min FVG check - C1: O:{c1.open:.2f} H:{c1.high:.2f} L:{c1.low:.2f} C:{c1.close:.2f}")
+            self.logger.info(f"15min FVG check - C2: O:{c2.open:.2f} H:{c2.high:.2f} L:{c2.low:.2f} C:{c2.close:.2f}")
+            self.logger.info(f"15min FVG check - C3: O:{c3.open:.2f} H:{c3.high:.2f} L:{c3.low:.2f} C:{c3.close:.2f}")
+            self.logger.info(f"15min FVG condition - C3.low ({c3.low:.2f}) > C1.high ({c1.high:.2f}) = {c3.low > c1.high}")
         
         # Check for bullish FVG (c3.low > c1.high)
         if c3.low > c1.high:
@@ -558,10 +733,15 @@ class CandleStrategy:
                 # Find the lowest low among all tracked bear candles
                 lowest_bear_low = min([candle.low for candle in self.last_bear_candles])
                 
+                # Calculate target (entry + 2x risk for 1:2 RR)
+                risk = current_price - lowest_bear_low
+                target = current_price + (2 * risk)
+                
                 cisd_trigger = {
                     'type': 'CISD',
                     'entry': current_price,
                     'stop_loss': lowest_bear_low,  # Stop loss is low of lowest tracked bear candle
+                    'target': target,
                     'bear_candle': bear_candle,
                     'lowest_bear_low': lowest_bear_low
                 }
@@ -750,3 +930,73 @@ class CandleStrategy:
             return {'action': 'exit', 'reason': 'target', 'price': self.current_target}
         
         return None
+    
+    def set_initial_15min_candle(self, candle):
+        """Set the initial 15-minute candle for proper tracking"""
+        if candle:
+            self.current_15min_candle = candle
+            self.fifteen_min_candles.append(candle)
+            
+            if self.logger:
+                self.logger.info(f"Set initial 15-minute candle: {candle.timestamp.strftime('%H:%M:%S')} - O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+            else:
+                print(f"Set initial 15-minute candle: {candle.timestamp.strftime('%H:%M:%S')} - O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+            
+            # Classify and analyze the initial candle
+            self.classify_and_analyze_15min_candle(candle)
+    
+    def should_move_target(self, current_price):
+        """Check if target should be moved based on profit levels"""
+        if not self.in_trade or not self.entry_price or not self.current_target:
+            return None
+        
+        # Calculate profit percentage
+        profit = current_price - self.entry_price
+        risk = self.entry_price - self.current_stop_loss
+        profit_percentage = profit / risk if risk > 0 else 0
+        
+        # Move to RR=4 at 100% profit
+        if profit_percentage >= 1.0 and not self.target_moved_to_rr4:
+            return "move_to_rr4"
+        
+        # Remove target and trail at 200% profit
+        if profit_percentage >= 2.0 and not self.target_removed:
+            return "remove_target"
+        
+        return None
+    
+    def move_target_to_rr4(self):
+        """Move target to RR=4 (4:1 risk:reward)"""
+        if not self.in_trade or not self.entry_price or not self.current_stop_loss:
+            return False
+        
+        risk = self.entry_price - self.current_stop_loss
+        new_target = self.entry_price + (4 * risk)
+        new_target = round_to_tick(new_target, self.tick_size)
+        
+        old_target = self.current_target
+        self.current_target = new_target
+        self.target_moved_to_rr4 = True
+        
+        if self.logger:
+            self.logger.info(f"Target moved to RR=4: {old_target:.2f} → {new_target:.2f}")
+        else:
+            print(f"Target moved to RR=4: {old_target:.2f} → {new_target:.2f}")
+        
+        return True
+    
+    def remove_target_and_trail(self):
+        """Remove target and start trailing stop loss"""
+        if not self.in_trade:
+            return False
+        
+        old_target = self.current_target
+        self.current_target = None
+        self.target_removed = True
+        
+        if self.logger:
+            self.logger.info(f"Target removed for trailing: {old_target:.2f} → None")
+        else:
+            print(f"Target removed for trailing: {old_target:.2f} → None")
+        
+        return True

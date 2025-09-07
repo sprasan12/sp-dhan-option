@@ -16,6 +16,12 @@ import pytz
 from models.candle import Candle
 from utils.market_utils import is_market_hours, is_trading_ending, round_to_tick
 from strategies.candle_strategy import CandleStrategy
+from strategies.symbol_manager import SymbolManager
+from strategies.erl_to_irl_strategy import ERLToIRLStrategy
+from demo.demo_server import DemoServer
+from demo.demo_data_client import DemoDataClient
+from demo.multi_symbol_demo_server import MultiSymbolDemoServer
+from demo.multi_symbol_demo_client import MultiSymbolDemoClient
 from brokers.dhan_broker import DhanBroker
 from brokers.demo_broker import DemoBroker
 from utils.market_data import MarketDataWebSocket, process_ticker_data
@@ -89,29 +95,63 @@ class DualModeTradingBot:
         else:
             self._init_demo_mode()
         
-        # Common components
-        self.strategy = CandleStrategy(
-            tick_size=self.config.tick_size, 
-            swing_look_back=self.config.swing_look_back,
-            logger=self.logger,
-            exit_callback=self._on_strategy_trade_exit,
-            entry_callback=self._on_strategy_trade_entry
-        )
+        # Get symbols to trade
+        self.symbols = self.config.get_symbols()
+        if not self.symbols:
+            raise ValueError("No symbols configured for trading")
+
+        if self.config.is_dual_symbol_mode():
+            # Dual symbol mode - use SymbolManager
+            self.strategy_manager = SymbolManager(
+                symbols=self.symbols,
+                tick_size=self.config.tick_size,
+                swing_look_back=self.config.swing_look_back,
+                logger=self.logger,
+                exit_callback=self._on_strategy_trade_exit,
+                entry_callback=self._on_strategy_trade_entry
+            )
+            # Also create ERL to IRL strategy for dual symbol mode
+            self.erl_to_irl_strategy = ERLToIRLStrategy(
+                tick_size=self.config.tick_size,
+                logger=self.logger
+            )
+            # Set callbacks for the ERL to IRL strategy
+            self.erl_to_irl_strategy.set_callbacks(
+                entry_callback=self._on_erl_to_irl_trade_entry,
+                exit_callback=self._on_erl_to_irl_trade_exit
+            )
+            self.strategy = None  # Not used in dual mode
+        else:
+            # Single symbol mode - use original CandleStrategy
+            self.strategy = CandleStrategy(
+                tick_size=self.config.tick_size, 
+                swing_look_back=self.config.swing_look_back,
+                logger=self.logger,
+                exit_callback=self._on_strategy_trade_exit,
+                entry_callback=self._on_strategy_trade_entry
+            )
+            self.strategy_manager = None  # Not used in single mode
+            self.erl_to_irl_strategy = None  # Not used in single mode
+        
         self.position_manager = PositionManager(self.broker, self.account_manager, self.config.tick_size)
         
         # Market data
         self.instruments_df = None
-        self.symbol = self.config.demo_symbol if self.config.is_demo_mode() else os.getenv('TRADING_SYMBOL', 'NIFTY 21 AUG 24700 CALL')
+        self.symbol = self.symbols[0]  # Primary symbol for backward compatibility
         
         # Data sources
         self.websocket = None
         self.demo_server = None
         self.demo_client = None
-        
+        self.multi_symbol_demo_server = None
+        self.multi_symbol_demo_client = None
+
         # Candle tracking
-        self.fifteen_min_candles = deque(maxlen=10)  # Keep last 10 candles
-        self.one_min_candles = deque(maxlen=100)
+        self.fifteen_min_candles = deque(maxlen=1000)
+        self.five_min_candles = deque(maxlen=3000)# Keep last 10 days
+        self.one_min_candles = deque(maxlen=10000)
         self.current_15min_candle = None
+        self.current_5min_candle = None
         self.current_1min_candle = None
         self.last_15min_candle_time = None
         self.last_1min_candle_time = None
@@ -123,7 +163,16 @@ class DualModeTradingBot:
         self.last_bear_candles = deque(maxlen=10)
         
         self.logger.info(f"Trading Bot initialized in {self.config.mode.value.upper()} mode")
-        self.logger.info(f"Trading Symbol: {self.symbol}")
+        self.logger.info(f"Strategy Mode: {self.config.strategy_mode.value.upper()}")
+        
+        if self.config.is_erl_to_irl_strategy():
+            self.logger.info("ERL to IRL Strategy: Trading External Range Liquidity to Internal Range Liquidity")
+            self.logger.info(f"Trading Symbol: {self.symbol}")
+        elif self.config.is_dual_symbol_mode():
+            self.logger.info(f"Trading Symbols: {self.symbols[0]} (Primary), {self.symbols[1]} (Secondary)")
+            self.logger.info("Dual Symbol Mode: Will monitor both symbols but trade only one at a time")
+        else:
+            self.logger.info(f"Trading Symbol: {self.symbol}")
         self.logger.info(f"Account Balance: ₹{self.account_manager.get_current_balance():,.2f}")
     
     def _init_live_mode(self):
@@ -173,6 +222,127 @@ class DualModeTradingBot:
         
         self.logger.info("Demo mode components initialized")
     
+    def _initialize_erl_to_irl_historical_data(self):
+        """Initialize historical data for ERL to IRL strategy"""
+        self.logger.info("Initializing ERL to IRL strategy with 10 days of historical data...")
+        
+        # Determine the reference date for fetching historical data
+        if self.config.is_demo_mode():
+            # For demo mode, use DEMO_START_DATE as the reference (current time for strategy)
+            reference_date = self.config.get_demo_start_datetime()
+            self.logger.info(f"Demo mode: Using {reference_date.strftime('%Y-%m-%d %H:%M:%S')} as reference date for strategy")
+        else:
+            # For live mode, use current time as reference
+            reference_date = datetime.now()
+            self.logger.info(f"Live mode: Using current time {reference_date.strftime('%Y-%m-%d %H:%M:%S')} as reference date")
+        hist_days = self.config.get_num_hist_days()
+        # For ERL to IRL strategy, we need 10 days of 5min and 15min data
+        for symbol in self.symbols:
+            self.logger.info(f"Fetching 10 days of historical data for {symbol}...")
+            
+            # Fetch 10 days of data for both 5min and 15min
+            historical_data = self.historical_fetcher.fetch_10_days_historical_data(
+                symbol=symbol,
+                instruments_df=self.instruments_df,
+                reference_date=reference_date,
+                hist_days=float(hist_days)
+            )
+            
+            if historical_data['5min'] is not None and historical_data['15min'] is not None:
+                # Convert DataFrames to Candle objects
+                candles_5min = []
+                for _, row in historical_data['5min'].iterrows():
+                    candle = Candle(
+                        timestamp=row['timestamp'],
+                        open_price=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close'])
+                    )
+                    candles_5min.append(candle)
+                
+                candles_15min = []
+                for _, row in historical_data['15min'].iterrows():
+                    candle = Candle(
+                        timestamp=row['timestamp'],
+                        open_price=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close'])
+                    )
+                    candles_15min.append(candle)
+                
+                # Initialize the ERL to IRL strategy with historical data
+                candle_data = {
+                    '5min': candles_5min,
+                    '15min': candles_15min
+                }
+                
+                success = self.erl_to_irl_strategy.initialize_with_historical_data(symbol, candle_data)
+                
+                if success:
+                    self.logger.info(f"✅ ERL to IRL strategy initialized for {symbol}")
+                    self.logger.info(f"   Loaded {len(candles_5min)} 5-minute candles")
+                    self.logger.info(f"   Loaded {len(candles_15min)} 15-minute candles")
+                else:
+                    self.logger.error(f"❌ Failed to initialize ERL to IRL strategy for {symbol}")
+            else:
+                self.logger.error(f"❌ Failed to fetch historical data for {symbol}")
+        
+        # For demo mode, also initialize demo server components
+        if self.config.is_demo_mode():
+            self._initialize_demo_server_for_erl_to_irl()
+        
+        self.logger.info("ERL to IRL strategy initialization completed")
+    
+    def _initialize_demo_server_for_erl_to_irl(self):
+        """Initialize demo server components for ERL to IRL strategy in demo mode"""
+        try:
+            # For demo mode, stream 1-minute candles from DEMO_START_DATE to current time
+            start_date = self.config.get_demo_start_datetime()
+            end_date = datetime.now()  # Stream until current time
+            
+            self.logger.info(f"Demo server: Streaming 1min candles from {start_date.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            
+            # Fetch historical data for all symbols
+            symbols_data = {}
+            for symbol in self.symbols:
+                self.logger.info(f"Fetching 1min data for {symbol}...")
+                historical_data = self.historical_fetcher.fetch_1min_candles(
+                    symbol=symbol,
+                    instruments_df=self.instruments_df,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                if historical_data is not None and len(historical_data) > 0:
+                    symbols_data[symbol] = historical_data
+                    self.logger.info(f"✅ Loaded {len(historical_data)} 1min candles for {symbol}")
+                else:
+                    self.logger.warning(f"❌ Could not fetch historical data for {symbol}")
+            
+            if symbols_data:
+                # Create multi-symbol demo server
+                self.multi_symbol_demo_server = MultiSymbolDemoServer(
+                    symbols_data=symbols_data,
+                    start_date=start_date,
+                    interval_minutes=self.config.demo_interval_minutes,
+                    port=self.config.demo_server_port,
+                    stream_interval_seconds=self.config.demo_stream_interval_seconds
+                )
+                
+                # Create multi-symbol demo client
+                self.multi_symbol_demo_client = MultiSymbolDemoClient(f"http://localhost:{self.config.demo_server_port}")
+                
+                self.logger.info(f"Multi-symbol demo server initialized for {len(symbols_data)} symbols")
+                self.logger.info(f"Symbols: {', '.join(symbols_data.keys())}")
+                self.logger.info(f"Streaming date range: {start_date.strftime('%Y-%m-%d %H:%M:%S')} to {end_date.strftime('%Y-%m-%d %H:%M:%S')}")
+            else:
+                self.logger.error("Could not fetch historical data for any symbol")
+                
+        except Exception as e:
+            self.logger.error(f"Error initializing demo server for ERL to IRL strategy: {e}")
+    
     def load_instruments(self):
         """Load instruments list from Dhan API"""
         try:
@@ -205,41 +375,53 @@ class DualModeTradingBot:
     
     def initialize_historical_data(self):
         """Initialize historical data based on mode"""
-        if self.config.is_live_mode():
-            self._initialize_live_historical_data()
-        else:
-            self._initialize_demo_historical_data()
+        #if self.config.is_erl_to_irl_strategy():
+        self._initialize_erl_to_irl_historical_data()
+        #elif self.config.is_live_mode():
+            #self._initialize_live_historical_data()
+        #else:
+            #self._initialize_demo_historical_data()
     
     def _initialize_live_historical_data(self):
         """Initialize historical data for live trading"""
         print("Fetching last 30 days of 15-minute candles for live trading...")
         
-        # Fetch last 30 days of 15-minute candles
-        historical_data = self.historical_fetcher.fetch_15min_candles(
-            symbol=self.symbol,
-            instruments_df=self.instruments_df,
-            days_back=30
-        )
-        
-        if historical_data is not None and len(historical_data) > 0:
-            # Convert to Candle objects and add to 15-minute candle list
-            for _, row in historical_data.iterrows():
-                candle = Candle(
-                    timestamp=row['timestamp'],
-                    open_price=float(row['open']),
-                    high=float(row['high']),
-                    low=float(row['low']),
-                    close=float(row['close'])
-                )
-                self.fifteen_min_candles.append(candle)
+        for symbol in self.symbols:
+            print(f"Fetching historical data for {symbol}...")
             
-            print(f"Loaded {len(self.fifteen_min_candles)} historical 15-minute candles")
+            # Fetch last 30 days of 15-minute candles
+            historical_data = self.historical_fetcher.fetch_15min_candles(
+                symbol=symbol,
+                instruments_df=self.instruments_df,
+                days_back=30
+            )
             
-            # Set last candle time
-            if self.fifteen_min_candles:
-                self.last_15min_candle_time = self.fifteen_min_candles[-1].timestamp
-        else:
-            print("Warning: Could not fetch historical data for live trading")
+            if historical_data is not None and len(historical_data) > 0:
+                # Convert to Candle objects and add to 15-minute candle list
+                candles = []
+                for _, row in historical_data.iterrows():
+                    candle = Candle(
+                        timestamp=row['timestamp'],
+                        open_price=float(row['open']),
+                        high=float(row['high']),
+                        low=float(row['low']),
+                        close=float(row['close'])
+                    )
+                    candles.append(candle)
+                
+                print(f"Loaded {len(candles)} historical 15-minute candles for {symbol}")
+                
+                # Set initial candle for the symbol's strategy
+                if self.config.is_dual_symbol_mode() and self.strategy_manager:
+                    if candles:
+                        self.strategy_manager.set_initial_15min_candle(symbol, candles[-1])
+                else:
+                    # Single symbol mode - use legacy approach
+                    self.fifteen_min_candles.extend(candles)
+                    if self.fifteen_min_candles:
+                        self.last_15min_candle_time = self.fifteen_min_candles[-1].timestamp
+            else:
+                print(f"Warning: Could not fetch historical data for {symbol}")
     
     def _initialize_demo_historical_data(self):
         """Initialize historical data for demo trading"""
@@ -249,9 +431,13 @@ class DualModeTradingBot:
         start_date = self.config.get_demo_start_datetime()
         end_date = start_date + timedelta(days=self.config.historical_data_days)
         
-        # Fetch 1-minute candles for demo
+        # For demo mode, we'll use the primary symbol for the demo server
+        # but track both symbols in the strategy manager
+        primary_symbol = self.symbols[0]
+        
+        # Fetch 1-minute candles for demo (using primary symbol)
         historical_data = self.historical_fetcher.fetch_1min_candles(
-            symbol=self.symbol,
+            symbol=primary_symbol,
             instruments_df=self.instruments_df,
             start_date=start_date,
             end_date=end_date
@@ -270,14 +456,37 @@ class DualModeTradingBot:
             # Create demo client
             self.demo_client = DemoDataClient(f"http://localhost:{self.config.demo_server_port}")
             
-            print(f"Demo server initialized with {len(historical_data)} 1-minute candles")
+            print(f"Demo server initialized with {len(historical_data)} 1-minute candles for {primary_symbol}")
             print(f"Date range: {start_date.date()} to {end_date.date()}")
+            
+            # For dual symbol mode, we'll simulate the second symbol's data
+            if self.config.is_dual_symbol_mode() and len(self.symbols) > 1:
+                print(f"Note: Demo mode will simulate data for both {self.symbols[0]} and {self.symbols[1]}")
+                print("In live mode, both symbols will receive real market data")
         else:
             print("Warning: Could not fetch historical data for demo trading")
     
     def start_demo_server(self):
         """Start the demo server in a separate thread"""
-        if self.demo_server:
+        # Check if we have multi-symbol demo server (for ERL to IRL strategy)
+        if self.multi_symbol_demo_server:
+            import threading
+            server_thread = threading.Thread(target=self.multi_symbol_demo_server.run)
+            server_thread.daemon = True
+            server_thread.start()
+            
+            # Wait for server to start
+            time.sleep(3)
+            
+            # Connect client to server
+            if self.multi_symbol_demo_client.connect():
+                print("Multi-symbol demo server started and client connected")
+                return True
+            else:
+                print("Failed to connect to multi-symbol demo server")
+                return False
+        # Fallback to single-symbol demo server (for regular strategy)
+        elif self.demo_server:
             import threading
             server_thread = threading.Thread(target=self.demo_server.run)
             server_thread.daemon = True
@@ -298,11 +507,15 @@ class DualModeTradingBot:
     def setup_live_websocket(self):
         """Setup live trading WebSocket"""
         if self.config.is_live_mode():
-            # Get security ID
-            self.security_id = self.broker.get_security_id(self.symbol, self.instruments_df)
-            if not self.security_id:
-                print(f"Could not find security ID for symbol {self.symbol}")
-                return False
+            # Get security IDs for all symbols
+            self.security_ids = {}
+            for symbol in self.symbols:
+                security_id = self.broker.get_security_id(symbol, self.instruments_df)
+                if not security_id:
+                    print(f"Could not find security ID for symbol {symbol}")
+                    return False
+                self.security_ids[symbol] = security_id
+                print(f"Found security ID {security_id} for symbol {symbol}")
             
             # Create WebSocket
             self.websocket = MarketDataWebSocket(
@@ -313,9 +526,9 @@ class DualModeTradingBot:
                 on_close_callback=self._on_websocket_close
             )
             
-            # Connect to WebSocket
-            if self.websocket.connect(self.security_id):
-                print("Live WebSocket connected successfully")
+            # Connect to WebSocket with all security IDs
+            if self.websocket.connect(list(self.security_ids.values())):
+                print(f"Live WebSocket connected successfully for {len(self.symbols)} symbols")
                 return True
             else:
                 print("Failed to connect to live WebSocket")
@@ -341,61 +554,113 @@ class DualModeTradingBot:
     
     def _on_price_update(self, price_or_candle_data, timestamp, security_id):
         """Handle price updates from live or demo data"""
+        # Determine which symbol this data belongs to
+        symbol = self._get_symbol_from_security_id(security_id)
+        if not symbol:
+            return  # Skip if we can't identify the symbol
+        
         # Handle both live mode (price) and demo mode (candle_data)
         if isinstance(price_or_candle_data, dict):
             # Demo mode - we have complete candle data
             candle_data = price_or_candle_data
             price = round_to_tick(float(candle_data["close"]), self.config.tick_size)
             # Update 1-minute candle with complete OHLC data
-            self._update_1min_candle_with_data(candle_data, timestamp)
+            self._update_1min_candle_with_data(symbol, candle_data, timestamp)
             # Log candle data
             self.logger.log_candle_data(
                 "1min", timestamp,
                 float(candle_data["open"]),
                 float(candle_data["high"]),
                 float(candle_data["low"]),
-                float(candle_data["close"])
+                float(candle_data["close"]),
+                symbol=symbol
             )
         else:
             # Live mode - we have just the price
             price = round_to_tick(float(price_or_candle_data), self.config.tick_size)
             # Update 1-minute candle with just the price
-            self._update_1min_candle(price, timestamp)
+            self._update_1min_candle(symbol, price, timestamp)
             # Log price update
             self.logger.log_price_update(price, timestamp, "live")
         
         # Run strategy
-        self._run_strategy_logic(price, timestamp)
+        self._run_strategy_logic(symbol, price, timestamp)
     
-    def _update_1min_candle(self, price, timestamp):
+    def _on_multi_symbol_price_update(self, candles_data, timestamp, security_id):
+        """Handle multi-symbol price updates from demo data"""
+        # Process each symbol's candle data
+        for symbol, candle_data in candles_data.items():
+            if candle_data:
+                # Create Candle object from candle data
+                candle_1m = Candle(
+                    timestamp=timestamp,
+                    open_price=float(candle_data["open"]),
+                    high=float(candle_data["high"]),
+                    low=float(candle_data["low"]),
+                    close=float(candle_data["close"])
+                )
+                
+
+                # Log the 1m candle
+                self.logger.log_candle_data(
+                    "1min", timestamp,
+                    candle_1m.open, candle_1m.high, candle_1m.low, candle_1m.close,
+                    symbol=symbol
+                )
+
+                # Update strategy with 1m candle for sweep detection
+                if self.erl_to_irl_strategy:
+                    self.erl_to_irl_strategy.update_1m_candle(candle_1m)
+                
+                # Run strategy logic with the candle data
+                self._run_strategy_logic(symbol, candle_data, timestamp)
+    
+    def _get_symbol_from_security_id(self, security_id):
+        """Get symbol from security ID"""
+        if hasattr(self, 'security_ids'):
+            for symbol, sid in self.security_ids.items():
+                if sid == security_id:
+                    return symbol
+        # Fallback for single symbol mode
+        return self.symbol if hasattr(self, 'symbol') else None
+    
+    def _update_1min_candle(self, symbol, price, timestamp):
         """Update 1-minute candle with just price (for live mode)"""
-        self.strategy.update_1min_candle(price, timestamp)
+        if self.config.is_dual_symbol_mode() and self.strategy_manager:
+            self.strategy_manager.update_1min_candle(symbol, price, timestamp)
+        elif self.strategy:
+            self.strategy.update_1min_candle(price, timestamp)
     
-    def _update_1min_candle_with_data(self, candle_data, timestamp):
+    def _update_1min_candle_with_data(self, symbol, candle_data, timestamp):
         """Update 1-minute candle with complete OHLC data (for demo mode)"""
-        self.strategy.update_1min_candle_with_data(candle_data, timestamp)
+        if self.config.is_dual_symbol_mode() and self.strategy_manager:
+            self.strategy_manager.update_1min_candle_with_data(symbol, candle_data, timestamp)
+        elif self.strategy:
+            self.strategy.update_1min_candle_with_data(candle_data, timestamp)
     
-    def _on_strategy_trade_exit(self, exit_price, reason):
+    def _on_strategy_trade_exit(self, exit_price, reason, symbol=None):
         """Callback method called when strategy exits a trade"""
         # Round exit price to tick size
         exit_price = round_to_tick(exit_price, self.config.tick_size)
-        self.logger.info(f"Strategy trade exit callback: {reason} at {exit_price:.2f}")
+        self.logger.info(f"Strategy trade exit callback for {symbol or 'symbol'}: {reason} at {exit_price:.2f}")
         # Reset position manager state
         self.position_manager.handle_trade_exit(exit_price, reason)
         
         # Get current account balance for logging
         try:
             account_balance = self.broker.get_account_balance()
-            # Update the strategy's exit_trade call with account balance
-            self.strategy.exit_trade(exit_price, reason, account_balance)
+            # Note: exit_trade is already called by the strategy itself, we just need to log the account balance
+            self.logger.info(f"Account balance after trade exit: ₹{account_balance:.2f}")
         except Exception as e:
             self.logger.error(f"Failed to get account balance: {e}")
-            # Fallback to exit without account balance
-            self.strategy.exit_trade(exit_price, reason)
     
-    def _on_strategy_trade_entry(self, sweep_trigger):
+    def _on_strategy_trade_entry(self, sweep_trigger, symbol=None):
         """Callback method called when strategy detects a trade entry trigger"""
-        self.logger.info(f"Strategy trade entry trigger detected: {sweep_trigger}")
+        # Get the symbol from trigger if not provided
+        if symbol is None:
+            symbol = sweep_trigger.get('symbol', self.symbol)
+        
+        self.logger.info(f"Strategy trade entry trigger detected for {symbol}: {sweep_trigger}")
         
         # Calculate target based on 2:1 RR - ROUND ALL PRICES TO TICK SIZE
         entry_price = round_to_tick(sweep_trigger['entry'], self.config.tick_size)
@@ -407,14 +672,19 @@ class DualModeTradingBot:
         self.logger.log_trade_entry(
             entry_price, stop_loss, target,
             sweep_trigger.get('type', 'UNKNOWN'),
-            self.symbol
+            symbol
         )
         
         # Enter the trade using strategy's trade management
-        self.strategy.enter_trade(entry_price, stop_loss, target)
+        if self.config.is_dual_symbol_mode() and self.strategy_manager:
+            # Dual symbol mode - use the specific symbol's strategy
+            if symbol in self.strategy_manager.strategies:
+                self.strategy_manager.strategies[symbol].enter_trade(entry_price, stop_loss, target)
+        elif self.strategy:
+            # Single symbol mode
+            self.strategy.enter_trade(entry_price, stop_loss, target)
         
         # Also update position manager for order placement
-        symbol = self.symbol
         instruments_df = self.instruments_df
         
         success = self.position_manager.enter_trade_with_trigger(
@@ -425,14 +695,67 @@ class DualModeTradingBot:
         )
         
         if success:
-            self.logger.info("✅ Trade entered successfully!")
+            self.logger.info(f"✅ Trade entered successfully for {symbol}!")
         else:
-            self.logger.error("❌ Failed to enter trade")
+            self.logger.error(f"❌ Failed to enter trade for {symbol}")
             # Reset strategy if order placement failed
-            self.strategy.exit_trade(entry_price, "order_failed")
+            if self.config.is_dual_symbol_mode() and self.strategy_manager and symbol in self.strategy_manager.strategies:
+                self.strategy_manager.strategies[symbol].exit_trade(entry_price, "order_failed")
+            elif self.strategy:
+                self.strategy.exit_trade(entry_price, "order_failed")
     
-    def _run_strategy_logic(self, price, timestamp):
+    def _on_erl_to_irl_trade_entry(self, trigger):
+        """Callback method called when ERL to IRL strategy detects a trade entry trigger"""
+        self.logger.info(f"ERL to IRL trade entry trigger detected: {trigger}")
+        
+        # Calculate target based on 2:1 RR - ROUND ALL PRICES TO TICK SIZE
+        entry_price = round_to_tick(trigger['entry'], self.config.tick_size)
+        stop_loss = round_to_tick(trigger['stop_loss'], self.config.tick_size)
+        risk = entry_price - stop_loss
+        target = round_to_tick(trigger['target'], self.config.tick_size)
+        
+        # Log trade entry
+        self.logger.log_trade_entry(
+            entry_price, stop_loss, target,
+            trigger.get('type', 'ERL_TO_IRL'),
+            self.symbol
+        )
+        
+        # Enter the trade using position manager
+        success = self.position_manager.enter_trade_with_trigger(
+            trigger, 
+            trigger.get('type', 'ERL_TO_IRL'),
+            self.symbol,
+            self.instruments_df
+        )
+        
+        if success:
+            self.logger.info(f"✅ ERL to IRL trade entered successfully!")
+        else:
+            self.logger.error(f"❌ Failed to enter ERL to IRL trade")
+    
+    def _on_erl_to_irl_trade_exit(self, exit_signal):
+        """Callback method called when ERL to IRL strategy exits a trade"""
+        exit_price = round_to_tick(exit_signal['price'], self.config.tick_size)
+        self.logger.info(f"ERL to IRL trade exit: {exit_signal['reason']} at {exit_price:.2f}")
+        
+        # Reset position manager state
+        self.position_manager.handle_trade_exit(exit_price, exit_signal['reason'])
+    
+    def _run_strategy_logic(self, symbol, price, timestamp):
         """Run the main strategy logic"""
+        if self.config.is_erl_to_irl_strategy() and self.erl_to_irl_strategy:
+            # ERL to IRL strategy mode
+            self._run_erl_to_irl_strategy_logic(symbol, price, timestamp)
+        elif self.config.is_dual_symbol_mode() and self.strategy_manager:
+            # Dual symbol mode
+            self._run_dual_symbol_strategy_logic(symbol, price, timestamp)
+        elif self.strategy:
+            # Single symbol mode - original logic
+            self._run_single_symbol_strategy_logic(price, timestamp)
+    
+    def _run_single_symbol_strategy_logic(self, price, timestamp):
+        """Run strategy logic for single symbol mode"""
         # Check if we're in a trade - if so, manage the trade
         if self.strategy.in_trade:
             # Check for trade exit (stop loss or target)
@@ -463,6 +786,169 @@ class DualModeTradingBot:
         
         # The strategy will automatically call the callback when a trade trigger is detected
         pass
+    
+    def _run_dual_symbol_strategy_logic(self, symbol, price, timestamp):
+        """Run strategy logic for dual symbol mode"""
+        # Check if we're already in a trade
+        if self.strategy_manager.is_any_symbol_in_trade():
+            # Get the active symbol's strategy
+            active_symbol = self.strategy_manager.get_active_symbol()
+            if active_symbol and active_symbol in self.strategy_manager.strategies:
+                active_strategy = self.strategy_manager.strategies[active_symbol]
+                
+                # Check for trade exit (stop loss or target)
+                exit_signal = active_strategy.check_trade_exit(price)
+                if exit_signal:
+                    # Exit the trade in strategy (callback will handle position manager reset)
+                    active_strategy.exit_trade(exit_signal['price'], exit_signal['reason'])
+                    return
+                
+                # Check if we should move stop loss (50% profit rule)
+                if active_strategy.should_move_stop_loss(price):
+                    # Once 50% profit is reached, continuously move SL to new swing lows
+                    if active_strategy.should_move_stop_loss_continuously():
+                        active_strategy.move_stop_loss_to_swing_low()
+                
+                # Check if we should move target based on profit levels
+                target_action = active_strategy.should_move_target(price)
+                if target_action == "move_to_rr4":
+                    active_strategy.move_target_to_rr4()
+                elif target_action == "remove_target":
+                    active_strategy.remove_target_and_trail()
+            
+            return  # Don't look for new entries while in a position
+        
+        # Not in trade - check for triggers from all symbols
+        # Get all pending triggers
+        triggers = self.strategy_manager.get_all_pending_triggers()
+        
+        if triggers:
+            # Select the best trigger
+            best_trigger = self.strategy_manager.select_best_trigger(triggers)
+            if best_trigger:
+                # The trigger already contains the symbol information
+                # The entry callback will be called automatically by the strategy
+                pass
+    
+    def _run_erl_to_irl_strategy_logic(self, symbol, price_or_candle_data, timestamp):
+        """Run strategy logic for ERL to IRL strategy mode"""
+        # Handle both price (live mode) and candle data (demo mode)
+        if isinstance(price_or_candle_data, dict):
+            # Demo mode - we have complete candle data
+            candle_data = price_or_candle_data
+            price = round_to_tick(float(candle_data["close"]), self.config.tick_size)
+            
+            # Create Candle object
+            current_candle = Candle(
+                timestamp=timestamp,
+                open_price=float(candle_data["open"]),
+                high=float(candle_data["high"]),
+                low=float(candle_data["low"]),
+                close=float(candle_data["close"])
+            )
+        else:
+            # Live mode - we have just the price
+            price = round_to_tick(float(price_or_candle_data), self.config.tick_size)
+            
+            # Create a simple candle from the price (live mode limitation)
+            current_candle = Candle(
+                timestamp=timestamp,
+                open_price=price,
+                high=price,
+                low=price,
+                close=price
+            )
+        
+        # Update the ERL to IRL strategy with current price
+        self.erl_to_irl_strategy.update_price(price, timestamp)
+        
+        # Update liquidity zones with new candles
+        #self._update_liquidity_zones_with_new_candles(symbol, current_candle, None)
+    
+    def _update_liquidity_zones_with_new_candles(self, symbol, candle_1m, current_candles):
+        """Update liquidity zones (FVGs, IFVGs, highs/lows) with new candles"""
+        try:
+            # Get latest candles for FVG/IFVG detection
+            latest_candles = self.candle_aggregator.get_latest_candles(symbol, count=10)
+            
+            # Update FVGs and IFVGs with new 5m candles
+            if latest_candles['5m'] and len(latest_candles['5m']) >= 3:
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_fvgs(
+                    latest_candles['5m'], "5min", symbol
+                )
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_implied_fvgs(
+                    latest_candles['5m'], "5min", symbol
+                )
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_previous_highs_lows(
+                    latest_candles['5m'], "5min", symbol
+                )
+            
+            # Update FVGs and IFVGs with new 15m candles
+            if latest_candles['15m'] and len(latest_candles['15m']) >= 3:
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_fvgs(
+                    latest_candles['15m'], "15min", symbol
+                )
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_implied_fvgs(
+                    latest_candles['15m'], "15min", symbol
+                )
+                self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_previous_highs_lows(
+                    latest_candles['15m'], "15min", symbol
+                )
+            
+            # Check for mitigation with 1m candle
+            self.erl_to_irl_strategy.liquidity_tracker.check_and_mark_mitigation(candle_1m)
+            
+        except Exception as e:
+            self.logger.error(f"Error updating liquidity zones for {symbol}: {e}")
+    
+    def _on_erl_to_irl_trade_entry(self, trade_data):
+        """Handle ERL to IRL trade entry"""
+        try:
+            if self.logger:
+                self.logger.info(f"🎯 ERL to IRL Trade Entry: {trade_data}")
+            
+            # Execute the trade through position manager
+            success = self.position_manager.enter_trade_with_trigger(
+                trigger=trade_data,
+                trigger_type=trade_data['type'],
+                symbol=trade_data.get('symbol', 'NIFTY 09 SEP 24800 CALL'),  # Default symbol
+                instruments_df=self.instruments_df
+            )
+            
+            if success:
+                if self.logger:
+                    self.logger.info(f"✅ ERL to IRL trade entered successfully")
+            else:
+                if self.logger:
+                    self.logger.error(f"❌ Failed to enter ERL to IRL trade")
+                    
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in ERL to IRL trade entry: {e}")
+    
+    def _on_erl_to_irl_trade_exit(self, trade_data):
+        """Handle ERL to IRL trade exit"""
+        try:
+            if self.logger:
+                self.logger.info(f"🎯 ERL to IRL Trade Exit: {trade_data}")
+            
+            # Execute the exit through position manager
+            success = self.position_manager.exit_position(
+                symbol=trade_data['symbol'],
+                price=trade_data['exit_price'],
+                reason=trade_data.get('reason', 'Strategy Exit')
+            )
+            
+            if success:
+                if self.logger:
+                    self.logger.info(f"✅ ERL to IRL trade exited successfully")
+            else:
+                if self.logger:
+                    self.logger.error(f"❌ Failed to exit ERL to IRL trade")
+                    
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in ERL to IRL trade exit: {e}")
     
     def _reset_sweep_detection(self):
         """Reset sweep detection after trade entry"""
@@ -495,11 +981,16 @@ class DualModeTradingBot:
                 return False
             
             # Start demo data stream
-            self.demo_client.set_callback(self._on_price_update)
-            self.demo_client.start_data_stream()
-            
-            # Start demo simulation
-            self.demo_client.start_simulation()
+            if self.multi_symbol_demo_client:
+                # Use multi-symbol demo client for ERL to IRL strategy
+                self.multi_symbol_demo_client.set_callback(self._on_multi_symbol_price_update)
+                self.multi_symbol_demo_client.start_data_stream()
+                self.multi_symbol_demo_client.start_simulation()
+            else:
+                # Use single-symbol demo client for regular strategy
+                self.demo_client.set_callback(self._on_price_update)
+                self.demo_client.start_data_stream()
+                self.demo_client.start_simulation()
         
         self.logger.info("Trading bot started successfully!")
         return True
@@ -599,7 +1090,15 @@ class DualModeTradingBot:
                 # Periodic tasks
                 if self.config.is_demo_mode():
                     # Check if demo simulation is complete
-                    status = self.demo_client.get_server_status()
+                    if self.multi_symbol_demo_client:
+                        # Use multi-symbol demo client for ERL to IRL strategy
+                        status = self.multi_symbol_demo_client.get_server_status()
+                    elif self.demo_client:
+                        # Use single-symbol demo client for regular strategy
+                        status = self.demo_client.get_server_status()
+                    else:
+                        status = {"error": "No demo client available"}
+                    
                     if "error" in status or "completed" in status.get("status", ""):
                         self.logger.info("Demo simulation completed")
                         break
@@ -671,8 +1170,10 @@ class DualModeTradingBot:
                 self.logger.info(f"   Current time: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
                 self.logger.info(f"   Last completed candle: {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             
-            # Fetch from Dhan API for both modes
-            self._fetch_latest_15min_candles(start_time, end_time)
+            # Fetch from Dhan API for all symbols
+            for symbol in self.symbols:
+                self.logger.info(f"   Fetching latest 15-min candle for {symbol}...")
+                self._fetch_latest_15min_candles_for_symbol(symbol, start_time, end_time)
                 
         except Exception as e:
             self.logger.warning(f"⚠️ Could not initialize 15-minute candles: {e}")
@@ -715,14 +1216,14 @@ class DualModeTradingBot:
         except Exception as e:
             self.logger.warning(f"⚠️ Error fetching live previous 15-minute candle: {e}")
     
-    def _fetch_latest_15min_candles(self, start_time, end_time):
-        """Fetch latest 15-minute candle from Dhan API for both live and demo modes"""
+    def _fetch_latest_15min_candles_for_symbol(self, symbol, start_time, end_time):
+        """Fetch latest 15-minute candle from Dhan API for a specific symbol"""
         try:
-            self.logger.info(f"   Fetching latest 15-minute candle from Dhan API: {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(f"   Fetching latest 15-minute candle for {symbol}: {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
             
             # Use the historical fetcher to get 15-minute candles directly
             historical_data = self.historical_fetcher.fetch_15min_candles(
-                symbol=self.symbol,
+                symbol=symbol,
                 instruments_df=self.instruments_df,
                 start_date=start_time,
                 end_date=end_time
@@ -731,12 +1232,9 @@ class DualModeTradingBot:
             if historical_data is not None and len(historical_data) > 0:
                 # Debug: Print what we requested vs what we received
                 self.logger.info(f"   REQUESTED: {start_time.strftime('%Y-%m-%d %H:%M:%S')} to {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.logger.info(f"   API Response: Received {len(historical_data)} candles")
+                self.logger.info(f"   API Response: Received {len(historical_data)} candles for {symbol}")
                 for i, (_, row) in enumerate(historical_data.iterrows()):
                     self.logger.info(f"   Candle {i+1}: {row['timestamp']} | O:{row['open']} H:{row['high']} L:{row['low']} C:{row['close']}")
-                
-                # Clear existing candles and add only the latest one
-                self.fifteen_min_candles.clear()
                 
                 # Find the candle that matches our requested start time
                 matching_candle = None
@@ -747,7 +1245,7 @@ class DualModeTradingBot:
                 
                 # If no exact match, take the first candle (closest to our request)
                 if matching_candle is None:
-                    self.logger.warning(f"   No exact timestamp match found, taking first candle")
+                    self.logger.warning(f"   No exact timestamp match found for {symbol}, taking first candle")
                     matching_candle = historical_data.iloc[0]
                 
                 candle = Candle(
@@ -757,29 +1255,38 @@ class DualModeTradingBot:
                     low=round_to_tick(float(matching_candle['low']), self.config.tick_size),
                     close=round_to_tick(float(matching_candle['close']), self.config.tick_size)
                 )
-                self.fifteen_min_candles.append(candle)
                 
-                self.logger.info(f"✅ Loaded latest 15-minute candle from Dhan API")
-                
-                # Set last candle time
-                self.last_15min_candle_time = candle.timestamp
-                self.logger.info(f"   Latest 15-min candle: {self.last_15min_candle_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"✅ Loaded latest 15-minute candle for {symbol}")
+                self.logger.info(f"   Latest 15-min candle: {candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
                 
                 # Log the OHLC data of the loaded candle
                 self.logger.log_candle_data(
                     "15min", candle.timestamp,
-                    candle.open, candle.high, candle.low, candle.close
+                    candle.open, candle.high, candle.low, candle.close,
+                    symbol=symbol
                 )
                 
                 # Pass the 15-minute candle to strategy for tracking
-                self.strategy.set_initial_15min_candle(candle)
+                if self.config.is_dual_symbol_mode() and self.strategy_manager:
+                    self.strategy_manager.set_initial_15min_candle(symbol, candle)
+                elif self.strategy:
+                    self.strategy.set_initial_15min_candle(candle)
+                    # Legacy single symbol mode
+                    self.fifteen_min_candles.clear()
+                    self.fifteen_min_candles.append(candle)
+                    self.last_15min_candle_time = candle.timestamp
             else:
-                self.logger.warning("⚠️ No 15-minute candle data received from Dhan API")
+                self.logger.warning(f"⚠️ No 15-minute candle data received for {symbol}")
                 
         except Exception as e:
-            self.logger.warning(f"⚠️ Error fetching latest 15-minute candle: {e}")
+            self.logger.warning(f"⚠️ Error fetching latest 15-minute candle for {symbol}: {e}")
             import traceback
             self.logger.warning(f"   Traceback: {traceback.format_exc()}")
+    
+    def _fetch_latest_15min_candles(self, start_time, end_time):
+        """Fetch latest 15-minute candle from Dhan API for both live and demo modes (legacy method)"""
+        # This method is kept for backward compatibility but now delegates to the new method
+        self._fetch_latest_15min_candles_for_symbol(self.symbol, start_time, end_time)
     
     def _aggregate_1min_to_15min_candles(self, one_min_data):
         """Aggregate 1-minute candles into 15-minute candles"""

@@ -4,7 +4,11 @@ Candle model for representing OHLC data with classification methods
 
 class Candle:
     def __init__(self, timestamp, open_price, high, low, close):
-        self.timestamp = timestamp
+        # Always ensure timestamp is timezone-naive for consistency
+        if hasattr(timestamp, 'tzinfo') and timestamp.tzinfo is not None:
+            self.timestamp = timestamp.replace(tzinfo=None)
+        else:
+            self.timestamp = timestamp
         self.open = open_price
         self.high = high
         self.low = low

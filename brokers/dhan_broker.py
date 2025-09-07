@@ -6,6 +6,7 @@ import os
 import time
 import json
 import requests
+from utils.rate_limiter import make_rate_limited_request, add_delay_between_requests
 from utils.market_utils import round_to_tick
 
 class DhanBroker:
@@ -52,8 +53,9 @@ class DhanBroker:
                 'Content-Type': 'application/json'
             }
             
-            # CORRECTED: Use the correct full URL for fundlimit endpoint
-            response = requests.get(
+            # CORRECTED: Use the correct full URL for fundlimit endpoint with rate limiting
+            response = make_rate_limited_request(
+                'GET',
                 'https://api.dhan.co/v2/fundlimit',
                 headers=headers
             )
@@ -120,7 +122,9 @@ class DhanBroker:
                 'Content-Type': 'application/json'
             }
             
-            response = requests.post(
+            # Use rate-limited request to avoid hitting API limits
+            response = make_rate_limited_request(
+                'POST',
                 f'{self.base_url}/orders',
                 headers=headers,
                 json=order_payload

@@ -8,6 +8,7 @@ import requests
 import pandas as pd
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from utils.rate_limiter import rate_limit, make_rate_limited_request, add_delay_between_requests
 
 class HistoricalDataFetcher:
     """Fetches historical data from Dhan API"""
@@ -112,7 +113,8 @@ class HistoricalDataFetcher:
                 'access-token': self.access_token
             }
             
-            response = requests.post(self.base_url, json=request_body, headers=headers)
+            # Use rate-limited request to avoid hitting API limits
+            response = make_rate_limited_request('POST', self.base_url, json=request_body, headers=headers)
             
             if response.status_code == 200:
                 data = response.json()
@@ -254,3 +256,83 @@ class HistoricalDataFetcher:
             end_date=end_date,
             interval="1min"
         )
+    
+    def fetch_5min_candles(self, symbol: str, instruments_df: pd.DataFrame,
+                          start_date: datetime, end_date: datetime) -> Optional[pd.DataFrame]:
+        """
+        Fetch 5-minute candles for liquidity analysis
+        
+        Args:
+            symbol: Trading symbol
+            instruments_df: Instruments dataframe
+            start_date: Start date
+            end_date: End date
+        
+        Returns:
+            DataFrame with 5-minute candles or None if failed
+        """
+        return self.fetch_historical_data(
+            symbol=symbol,
+            instruments_df=instruments_df,
+            start_date=start_date,
+            end_date=end_date,
+            interval="5min"
+        )
+    
+    def fetch_10_days_historical_data(self, symbol: str, instruments_df: pd.DataFrame,
+                                       reference_date: datetime = None, hist_days: float = 1.0) -> Dict[str, Optional[pd.DataFrame]]:
+        """
+        Fetch 10 days of historical data for both 5min and 15min timeframes
+        This is used for ERL to IRL strategy initialization
+        
+        Args:
+            symbol: Trading symbol
+            instruments_df: Instruments dataframe
+            reference_date: Reference date to calculate 10 days back from (default: current time)
+        
+        Returns:
+            Dictionary with '5min' and '15min' DataFrames
+        """
+        from datetime import datetime, timedelta
+        
+        # Calculate date range (10 trading days back from reference date)
+        if reference_date is None:
+            reference_date = datetime.now()
+        
+        end_date = reference_date
+        start_date = end_date - timedelta(days=hist_days) # 14 calendar days to ensure 10 trading days
+        
+        print(f"Fetching 10 days of historical data for {symbol}")
+        print(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        
+        # Fetch 5-minute candles
+        print("Fetching 5-minute candles...")
+        candles_5min = self.fetch_5min_candles(symbol, instruments_df, start_date, end_date)
+        
+        # Add delay between API calls to respect rate limits
+        print("Waiting to respect API rate limits...")
+        add_delay_between_requests(delay_seconds=0.5)  # 500ms delay
+        
+        # Fetch 15-minute candles
+        print("Fetching 15-minute candles...")
+        candles_15min = self.fetch_15min_candles(symbol, instruments_df, start_date=start_date, end_date=end_date)
+        
+        result = {
+            '5min': candles_5min,
+            '15min': candles_15min
+        }
+        
+        # Print summary
+        if candles_5min is not None:
+            print(f"✅ 5-minute candles: {len(candles_5min)} candles")
+            print(f"   Date range: {candles_5min['timestamp'].min()} to {candles_5min['timestamp'].max()}")
+        else:
+            print("❌ Failed to fetch 5-minute candles")
+        
+        if candles_15min is not None:
+            print(f"✅ 15-minute candles: {len(candles_15min)} candles")
+            print(f"   Date range: {candles_15min['timestamp'].min()} to {candles_15min['timestamp'].max()}")
+        else:
+            print("❌ Failed to fetch 15-minute candles")
+        
+        return result

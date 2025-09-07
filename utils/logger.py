@@ -103,10 +103,11 @@ class TradingLogger:
             self.info(f"   Account Balance: ₹{account_balance:.2f}")
         self.info("-" * 50)
     
-    def log_candle_data(self, timeframe, timestamp, open_price, high, low, close, volume=None):
+    def log_candle_data(self, timeframe, timestamp, open_price, high, low, close, volume=None, symbol=None):
         """Log candle data"""
         volume_str = f" V:{volume}" if volume else ""
-        self.info(f"📊 {timeframe} Candle: {timestamp.strftime('%H:%M:%S')} | O:{open_price:.2f} H:{high:.2f} L:{low:.2f} C:{close:.2f}{volume_str}")
+        symbol_str = f" [{symbol}]" if symbol else ""
+        self.info(f"📊 {timeframe} Candle{symbol_str}: {timestamp.strftime('%Y-%m-%d %H:%M:%S')} | O:{open_price:.2f} H:{high:.2f} L:{low:.2f} C:{close:.2f}{volume_str}")
     
     def log_sweep_detection(self, target_low, sweep_low, recovery_low, timestamp, candle_data=None):
         """Log sweep detection"""
@@ -177,6 +178,15 @@ class TradingLogger:
     def log_15min_candle_completion(self, candle):
         """Log 15-minute candle completion"""
         self.info("🕯️ 15-MINUTE CANDLE COMPLETED")
+        self.info(f"   Time: {candle.timestamp.strftime('%H:%M:%S')}")
+        self.info(f"   OHLC: O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+        self.info(f"   Body: {candle.body_size():.2f} ({candle.body_percentage():.1f}%)")
+        self.info(f"   Type: {'BULL' if candle.is_bull_candle() else 'BEAR' if candle.is_bear_candle() else 'NEUTRAL'}")
+        self.info("-" * 50)
+
+    def log_5min_candle_completion(self, candle):
+        """Log 5-minute candle completion"""
+        self.info("🕯️ 5-MINUTE CANDLE COMPLETED")
         self.info(f"   Time: {candle.timestamp.strftime('%H:%M:%S')}")
         self.info(f"   OHLC: O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
         self.info(f"   Body: {candle.body_size():.2f} ({candle.body_percentage():.1f}%)")
