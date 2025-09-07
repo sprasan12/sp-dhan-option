@@ -18,6 +18,7 @@ from utils.market_utils import is_market_hours, is_trading_ending, round_to_tick
 from strategies.candle_strategy import CandleStrategy
 from strategies.symbol_manager import SymbolManager
 from strategies.erl_to_irl_strategy import ERLToIRLStrategy
+from strategies.irl_to_erl_strategy import IRLToERLStrategy
 from demo.demo_server import DemoServer
 from demo.demo_data_client import DemoDataClient
 from demo.multi_symbol_demo_server import MultiSymbolDemoServer
@@ -120,6 +121,19 @@ class DualModeTradingBot:
                 entry_callback=self._on_erl_to_irl_trade_entry,
                 exit_callback=self._on_erl_to_irl_trade_exit
             )
+            
+            # Also create IRL to ERL strategy for dual symbol mode
+            self.irl_to_erl_strategy = IRLToERLStrategy(
+                symbol=self.symbols[0],  # Use first symbol as primary
+                tick_size=self.config.tick_size,
+                swing_look_back=self.config.swing_look_back,
+                logger=self.logger
+            )
+            # Set callbacks for the IRL to ERL strategy
+            self.irl_to_erl_strategy.set_callbacks(
+                entry_callback=self._on_irl_to_erl_trade_entry,
+                exit_callback=self._on_irl_to_erl_trade_exit
+            )
             self.strategy = None  # Not used in dual mode
         else:
             # Single symbol mode - use original CandleStrategy
@@ -165,12 +179,13 @@ class DualModeTradingBot:
         self.logger.info(f"Trading Bot initialized in {self.config.mode.value.upper()} mode")
         self.logger.info(f"Strategy Mode: {self.config.strategy_mode.value.upper()}")
         
-        if self.config.is_erl_to_irl_strategy():
-            self.logger.info("ERL to IRL Strategy: Trading External Range Liquidity to Internal Range Liquidity")
-            self.logger.info(f"Trading Symbol: {self.symbol}")
-        elif self.config.is_dual_symbol_mode():
+        if self.config.is_dual_symbol_mode():
             self.logger.info(f"Trading Symbols: {self.symbols[0]} (Primary), {self.symbols[1]} (Secondary)")
             self.logger.info("Dual Symbol Mode: Will monitor both symbols but trade only one at a time")
+            self.logger.info("Strategy Mode: Both ERLtoIRL and IRLtoERL strategies will run together")
+        elif self.config.is_erl_to_irl_strategy():
+            self.logger.info("ERL to IRL Strategy: Trading External Range Liquidity to Internal Range Liquidity")
+            self.logger.info(f"Trading Symbol: {self.symbol}")
         else:
             self.logger.info(f"Trading Symbol: {self.symbol}")
         self.logger.info(f"Account Balance: ₹{self.account_manager.get_current_balance():,.2f}")
@@ -286,6 +301,16 @@ class DualModeTradingBot:
                     self.logger.info(f"   Loaded {len(candles_15min)} 15-minute candles")
                 else:
                     self.logger.error(f"❌ Failed to initialize ERL to IRL strategy for {symbol}")
+                
+                # Initialize the IRL to ERL strategy with historical data
+                self.irl_to_erl_strategy.initialize_with_historical_data(candles_5min, candles_15min)
+                
+                if success:
+                    self.logger.info(f"✅ IRL to ERL strategy initialized for {symbol}")
+                    self.logger.info(f"   Loaded {len(candles_5min)} 5-minute candles")
+                    self.logger.info(f"   Loaded {len(candles_15min)} 15-minute candles")
+                else:
+                    self.logger.error(f"❌ Failed to initialize IRL to ERL strategy for {symbol}")
             else:
                 self.logger.error(f"❌ Failed to fetch historical data for {symbol}")
         
@@ -612,6 +637,10 @@ class DualModeTradingBot:
                 if self.erl_to_irl_strategy:
                     self.erl_to_irl_strategy.update_1m_candle(candle_1m)
                 
+                # Update IRL to ERL strategy with 1m candle for sting detection
+                if self.irl_to_erl_strategy:
+                    self.irl_to_erl_strategy.update_1m_candle(candle_1m)
+                
                 # Run strategy logic with the candle data
                 self._run_strategy_logic(symbol, candle_data, timestamp)
     
@@ -744,12 +773,12 @@ class DualModeTradingBot:
     
     def _run_strategy_logic(self, symbol, price, timestamp):
         """Run the main strategy logic"""
-        if self.config.is_erl_to_irl_strategy() and self.erl_to_irl_strategy:
-            # ERL to IRL strategy mode
-            self._run_erl_to_irl_strategy_logic(symbol, price, timestamp)
-        elif self.config.is_dual_symbol_mode() and self.strategy_manager:
-            # Dual symbol mode
+        if self.config.is_dual_symbol_mode() and self.strategy_manager:
+            # Dual symbol mode - run both ERLtoIRL and IRLtoERL strategies
             self._run_dual_symbol_strategy_logic(symbol, price, timestamp)
+        elif self.config.is_erl_to_irl_strategy() and self.erl_to_irl_strategy:
+            # ERL to IRL strategy mode (single symbol)
+            self._run_erl_to_irl_strategy_logic(symbol, price, timestamp)
         elif self.strategy:
             # Single symbol mode - original logic
             self._run_single_symbol_strategy_logic(price, timestamp)
@@ -818,8 +847,8 @@ class DualModeTradingBot:
             
             return  # Don't look for new entries while in a position
         
-        # Not in trade - check for triggers from all symbols
-        # Get all pending triggers
+        # Not in trade - check for triggers from all strategies
+        # Get all pending triggers from SymbolManager
         triggers = self.strategy_manager.get_all_pending_triggers()
         
         if triggers:
@@ -829,6 +858,39 @@ class DualModeTradingBot:
                 # The trigger already contains the symbol information
                 # The entry callback will be called automatically by the strategy
                 pass
+        
+        # Also run ERLtoIRL and IRLtoERL strategies for additional opportunities
+        if self.erl_to_irl_strategy:
+            self._run_erl_to_irl_strategy_logic(symbol, price, timestamp)
+        
+        if self.irl_to_erl_strategy:
+            self._run_irl_to_erl_strategy_logic(symbol, price, timestamp)
+    
+    def _run_irl_to_erl_strategy_logic(self, symbol, price_or_candle_data, timestamp):
+        """Run strategy logic for IRL to ERL strategy mode"""
+        # Handle both price (live mode) and candle data (demo mode)
+        if isinstance(price_or_candle_data, dict):
+            # Demo mode - we have complete candle data
+            candle_data = price_or_candle_data
+            price = round_to_tick(float(candle_data["close"]), self.config.tick_size)
+            
+            # Create Candle object
+            current_candle = Candle(
+                timestamp=timestamp,
+                open_price=float(candle_data["open"]),
+                high=float(candle_data["high"]),
+                low=float(candle_data["low"]),
+                close=float(candle_data["close"])
+            )
+            
+            # Update IRL to ERL strategy with 1m candle
+            self.irl_to_erl_strategy.update_1m_candle(current_candle)
+        else:
+            # Live mode - we only have price
+            price = price_or_candle_data
+            
+            # Update IRL to ERL strategy with current price
+            self.irl_to_erl_strategy.update_price(price, timestamp)
     
     def _run_erl_to_irl_strategy_logic(self, symbol, price_or_candle_data, timestamp):
         """Run strategy logic for ERL to IRL strategy mode"""
@@ -862,6 +924,10 @@ class DualModeTradingBot:
         # Update the ERL to IRL strategy with current price
         self.erl_to_irl_strategy.update_price(price, timestamp)
         
+        # Update the IRL to ERL strategy with current price
+        if self.irl_to_erl_strategy:
+            self.irl_to_erl_strategy.update_price(price, timestamp)
+        
         # Update liquidity zones with new candles
         #self._update_liquidity_zones_with_new_candles(symbol, current_candle, None)
     
@@ -873,6 +939,7 @@ class DualModeTradingBot:
             
             # Update FVGs and IFVGs with new 5m candles
             if latest_candles['5m'] and len(latest_candles['5m']) >= 3:
+                # Update ERL to IRL strategy
                 self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_fvgs(
                     latest_candles['5m'], "5min", symbol
                 )
@@ -882,9 +949,14 @@ class DualModeTradingBot:
                 self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_previous_highs_lows(
                     latest_candles['5m'], "5min", symbol
                 )
+                
+                # Update IRL to ERL strategy with new 5m candle
+                if self.irl_to_erl_strategy and latest_candles['5m']:
+                    self.irl_to_erl_strategy.update_5m_candle(latest_candles['5m'][-1])
             
             # Update FVGs and IFVGs with new 15m candles
             if latest_candles['15m'] and len(latest_candles['15m']) >= 3:
+                # Update ERL to IRL strategy
                 self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_fvgs(
                     latest_candles['15m'], "15min", symbol
                 )
@@ -894,6 +966,10 @@ class DualModeTradingBot:
                 self.erl_to_irl_strategy.liquidity_tracker._process_candles_for_previous_highs_lows(
                     latest_candles['15m'], "15min", symbol
                 )
+                
+                # Update IRL to ERL strategy with new 15m candle
+                if self.irl_to_erl_strategy and latest_candles['15m']:
+                    self.irl_to_erl_strategy.update_15m_candle(latest_candles['15m'][-1])
             
             # Check for mitigation with 1m candle
             self.erl_to_irl_strategy.liquidity_tracker.check_and_mark_mitigation(candle_1m)
@@ -926,29 +1002,62 @@ class DualModeTradingBot:
             if self.logger:
                 self.logger.error(f"Error in ERL to IRL trade entry: {e}")
     
-    def _on_erl_to_irl_trade_exit(self, trade_data):
+    def _on_erl_to_irl_trade_exit(self, exit_price, reason):
         """Handle ERL to IRL trade exit"""
         try:
             if self.logger:
-                self.logger.info(f"🎯 ERL to IRL Trade Exit: {trade_data}")
+                self.logger.info(f"🎯 ERL to IRL Trade Exit: {reason} at {exit_price:.2f}")
             
             # Execute the exit through position manager
-            success = self.position_manager.exit_position(
-                symbol=trade_data['symbol'],
-                price=trade_data['exit_price'],
-                reason=trade_data.get('reason', 'Strategy Exit')
-            )
+            self.position_manager.handle_trade_exit(exit_price, reason)
             
-            if success:
-                if self.logger:
-                    self.logger.info(f"✅ ERL to IRL trade exited successfully")
-            else:
-                if self.logger:
-                    self.logger.error(f"❌ Failed to exit ERL to IRL trade")
+            if self.logger:
+                self.logger.info(f"✅ ERL to IRL trade exited successfully")
                     
         except Exception as e:
             if self.logger:
                 self.logger.error(f"Error in ERL to IRL trade exit: {e}")
+    
+    def _on_irl_to_erl_trade_entry(self, trade_data):
+        """Handle IRL to ERL trade entry"""
+        try:
+            if self.logger:
+                self.logger.info(f"🎯 IRL to ERL Trade Entry: {trade_data}")
+            
+            # Execute the trade through position manager
+            success = self.position_manager.enter_trade_with_trigger(
+                trigger=trade_data,
+                trigger_type=trade_data['type'],
+                symbol=trade_data.get('symbol', 'NIFTY 09 SEP 24800 CALL'),  # Default symbol
+                instruments_df=self.instruments_df
+            )
+            
+            if success:
+                if self.logger:
+                    self.logger.info(f"✅ IRL to ERL trade entered successfully")
+            else:
+                if self.logger:
+                    self.logger.error(f"❌ Failed to enter IRL to ERL trade")
+                    
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in IRL to ERL trade entry: {e}")
+    
+    def _on_irl_to_erl_trade_exit(self, exit_price, reason):
+        """Handle IRL to ERL trade exit"""
+        try:
+            if self.logger:
+                self.logger.info(f"🎯 IRL to ERL Trade Exit: {reason} at {exit_price:.2f}")
+            
+            # Execute the exit through position manager
+            self.position_manager.handle_trade_exit(exit_price, reason)
+            
+            if self.logger:
+                self.logger.info(f"✅ IRL to ERL trade exited successfully")
+                    
+        except Exception as e:
+            if self.logger:
+                self.logger.error(f"Error in IRL to ERL trade exit: {e}")
     
     def _reset_sweep_detection(self):
         """Reset sweep detection after trade entry"""

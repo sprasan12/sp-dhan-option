@@ -335,8 +335,18 @@ class CandleStrategy:
                     if trigger:
                         if self.logger:
                             self.logger.info(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                            self.logger.info(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                            self.logger.info(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                            self.logger.info(f"   Entry: {trigger['entry']:.2f}")
+                            self.logger.info(f"   Stop Loss: {trigger['stop_loss']:.2f}")
+                            self.logger.info(f"   Target: {trigger['target']:.2f}")
                         else:
                             print(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                            print(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                            print(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                            print(f"   Entry: {trigger['entry']:.2f}")
+                            print(f"   Stop Loss: {trigger['stop_loss']:.2f}")
+                            print(f"   Target: {trigger['target']:.2f}")
                         self.enter_trade(trigger['entry'], trigger['stop_loss'], trigger['target'])
                         # Call entry callback if set
                         if self.entry_callback:
@@ -430,8 +440,18 @@ class CandleStrategy:
                     if trigger:
                         if self.logger:
                             self.logger.info(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                            self.logger.info(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                            self.logger.info(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                            self.logger.info(f"   Entry: {trigger['entry']:.2f}")
+                            self.logger.info(f"   Stop Loss: {trigger['stop_loss']:.2f}")
+                            self.logger.info(f"   Target: {trigger['target']:.2f}")
                         else:
                             print(f"🎯 TRADE TRIGGER FOUND: {trigger['type']}")
+                            print(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                            print(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                            print(f"   Entry: {trigger['entry']:.2f}")
+                            print(f"   Stop Loss: {trigger['stop_loss']:.2f}")
+                            print(f"   Target: {trigger['target']:.2f}")
                         self.enter_trade(trigger['entry'], trigger['stop_loss'], trigger['target'])
                         # Call entry callback if set
                         if self.entry_callback:
@@ -565,6 +585,7 @@ class CandleStrategy:
                     )
                 else:
                     self.logger.info(f"🎯 SWEEP DETECTED!")
+                    self.logger.info(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
                     self.logger.info(f"   1-Min Candle Low: {one_min_candle.low:.2f}")
                     self.logger.info(f"   Target Low: {self.sweep_low:.2f}")
                     self.logger.info(f"   Recovery Low: {self.recovery_low:.2f}")
@@ -659,8 +680,13 @@ class CandleStrategy:
             if self.logger:
                 self.logger.log_fvg_detection(gap_size, c3.close, self.recovery_low, [c1, c2, c3])
             else:
+                self.logger.info(f"✅ 1-Min Bullish FVG Detected!")
+                self.logger.info(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                self.logger.info(f"   Candle Time: {c3.timestamp.strftime('%H:%M:%S')}")
                 self.logger.info(f"   FVG Gap Size: {gap_size:.2f}")
+                self.logger.info(f"   Entry: {c3.close:.2f}")
                 self.logger.info(f"   Stop Loss (Recovery Low): {self.recovery_low:.2f}")
+                self.logger.info(f"   Target: {target:.2f}")
             
             return fvg
         else:
@@ -746,8 +772,24 @@ class CandleStrategy:
                     'lowest_bear_low': lowest_bear_low
                 }
                 
-                print(f"   CISD: Price {current_price:.2f} > Bear Open {bear_candle.open:.2f}")
-                print(f"   Stop Loss (Lowest Bear Low): {lowest_bear_low:.2f}")
+                if self.logger:
+                    self.logger.info(f"✅ CISD (Bear Candle Open) Detected!")
+                    self.logger.info(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                    self.logger.info(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   Current Price: {current_price:.2f}")
+                    self.logger.info(f"   Bear Open: {bear_candle.open:.2f}")
+                    self.logger.info(f"   Entry: {current_price:.2f}")
+                    self.logger.info(f"   Stop Loss (Lowest Bear Low): {lowest_bear_low:.2f}")
+                    self.logger.info(f"   Target: {target:.2f}")
+                else:
+                    print(f"✅ CISD (Bear Candle Open) Detected!")
+                    print(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                    print(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+                    print(f"   Current Price: {current_price:.2f}")
+                    print(f"   Bear Open: {bear_candle.open:.2f}")
+                    print(f"   Entry: {current_price:.2f}")
+                    print(f"   Stop Loss (Lowest Bear Low): {lowest_bear_low:.2f}")
+                    print(f"   Target: {target:.2f}")
                 
                 if self.logger:
                     self.logger.log_cisd_detection(current_price, lowest_bear_low, bear_candle.open, bear_candle)
@@ -811,6 +853,8 @@ class CandleStrategy:
                 self.logger.log_trade_exit(exit_price, reason, self.entry_price, pnl, account_balance)
             else:
                 print(f"🚪 TRADE EXITED - {reason}")
+                print(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                print(f"   Exit Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S') if self.current_1min_candle else 'Unknown'}")
                 print(f"   Entry: {self.entry_price:.2f}")
                 print(f"   Exit: {exit_price:.2f}")
                 print(f"   P&L: {pnl:.2f}")

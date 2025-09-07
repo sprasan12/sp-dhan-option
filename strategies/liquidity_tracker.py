@@ -406,5 +406,44 @@ class LiquidityTracker:
             'bearish_ifvgs': len([z for z in self.bearish_ifvgs if not z.mitigated]),
             'previous_highs': len(self.previous_highs),
             'previous_lows': len(self.previous_lows),
-            'total_active_zones': len([z for z in self.bullish_fvgs + self.bearish_fvgs + self.bullish_ifvgs + self.bearish_ifvgs if not z.mitigated])
+            'total_zones': len([z for z in self.bullish_fvgs + self.bearish_fvgs + self.bullish_ifvgs + self.bearish_ifvgs if not z.mitigated])
         }
+    
+    def get_bullish_fvgs(self) -> List[Dict]:
+        """Get all active bullish FVGs as dictionaries"""
+        return [
+            {
+                'upper': zone.price_high,
+                'lower': zone.price_low,
+                'midpoint': (zone.price_high + zone.price_low) / 2,
+                'timestamp': zone.timestamp,
+                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown'
+            }
+            for zone in self.bullish_fvgs if not zone.mitigated
+        ]
+    
+    def get_bullish_ifvgs(self) -> List[Dict]:
+        """Get all active bullish IFVGs as dictionaries"""
+        return [
+            {
+                'upper': zone.price_high,
+                'lower': zone.price_low,
+                'midpoint': (zone.price_high + zone.price_low) / 2,
+                'timestamp': zone.timestamp,
+                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown'
+            }
+            for zone in self.bullish_ifvgs if not zone.mitigated
+        ]
+    
+    def get_swing_highs(self) -> List[float]:
+        """Get all swing highs as a list of prices"""
+        return self.previous_highs.copy()
+    
+    def process_candle(self, candle: Candle, timeframe: str):
+        """Process a single candle to detect new FVGs/IFVGs"""
+        if timeframe == '5min':
+            self._process_candles_for_fvgs([candle], timeframe, "Unknown")
+            self._process_candles_for_implied_fvgs([candle], timeframe, "Unknown")
+        elif timeframe == '15min':
+            self._process_candles_for_fvgs([candle], timeframe, "Unknown")
+            self._process_candles_for_implied_fvgs([candle], timeframe, "Unknown")

@@ -63,7 +63,7 @@ class ERLToIRLStrategy(CandleStrategy):
         
         if self.logger:
             summary = self.liquidity_tracker.get_liquidity_summary()
-            self.logger.info(f"Strategy initialized with {summary['total_active_zones']} active liquidity zones")
+            self.logger.info(f"Strategy initialized with {summary['total_zones']} active liquidity zones")
         
         return True
     
