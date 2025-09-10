@@ -24,22 +24,47 @@ class DhanBroker:
             if instruments_df is None:
                 return None
             
-            # Filter for options in NSE
+            # First try to find in options
             options_df = instruments_df[
                 (instruments_df['EXCH_ID'] == 'NSE') & 
                 (instruments_df['SEGMENT'] == 'D') &
                 (instruments_df['INSTRUMENT'] == 'OPTIDX')
             ]
             
-            # Find the exact matching symbol using DISPLAY_NAME
             matching_instrument = options_df[options_df['DISPLAY_NAME'] == symbol]
             
             if not matching_instrument.empty:
                 security_id = int(matching_instrument.iloc[0]['SECURITY_ID'])
                 return security_id
-            else:
-                print(f"No matching instrument found for symbol {symbol}")
-                return None
+            
+            # If not found in options, try to find in index instruments
+            index_df = instruments_df[
+                (instruments_df['EXCH_ID'] == 'NSE') & 
+                (instruments_df['SEGMENT'] == 'D') &
+                (instruments_df['INSTRUMENT'] == 'IDX')
+            ]
+            
+            matching_instrument = index_df[index_df['DISPLAY_NAME'] == symbol]
+            
+            if not matching_instrument.empty:
+                security_id = int(matching_instrument.iloc[0]['SECURITY_ID'])
+                return security_id
+            
+            # If still not found, try equity instruments
+            equity_df = instruments_df[
+                (instruments_df['EXCH_ID'] == 'NSE') & 
+                (instruments_df['SEGMENT'] == 'D') &
+                (instruments_df['INSTRUMENT'] == 'EQ')
+            ]
+            
+            matching_instrument = equity_df[equity_df['DISPLAY_NAME'] == symbol]
+            
+            if not matching_instrument.empty:
+                security_id = int(matching_instrument.iloc[0]['SECURITY_ID'])
+                return security_id
+            
+            print(f"No matching instrument found for symbol {symbol}")
+            return None
                 
         except Exception as e:
             print(f"Error getting security ID: {e}")

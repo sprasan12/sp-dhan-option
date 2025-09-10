@@ -21,6 +21,7 @@ class MarketDataWebSocket:
         self.on_close_callback = on_close_callback
         self.ws = None
         self.ws_thread = None
+        self.security_ids = {}
         
     def on_message(self, ws, message):
         """Handle incoming WebSocket messages"""
@@ -42,26 +43,44 @@ class MarketDataWebSocket:
     def on_open(self, ws):
         """Handle WebSocket connection open"""
         print("WebSocket Connection Established")
-        # Subscribe to market data
-        if hasattr(self, 'security_id') and self.security_id:
+        print(f"DEBUG: on_open() - hasattr security_ids: {hasattr(self, 'security_ids')}")
+        print(f"DEBUG: on_open() - security_ids: {getattr(self, 'security_ids', 'NOT_FOUND')}")
+        # Subscribe to market data for all security IDs
+        if hasattr(self, 'security_ids') and self.security_ids:
+            instrument_list = []
+            for symbol, security_id in self.security_ids.items():
+                # For options, use NSE_FNO as you specified
+                exchange_segment = "NSE_FNO"
+                    
+                instrument_list.append({
+                    "ExchangeSegment": exchange_segment,
+                    "SecurityId": str(security_id)
+                })
+            
             subscribe_message = {
                 "RequestCode": 15,
-                "InstrumentCount": 1,
-                "InstrumentList": [
-                    {
-                        "ExchangeSegment": "NSE_FNO",
-                        "SecurityId": str(self.security_id)
-                    }
-                ]
+                "InstrumentCount": len(instrument_list),
+                "InstrumentList": instrument_list
             }
+            print(f"DEBUG: Sending subscription message: {json.dumps(subscribe_message, indent=2)}")
             ws.send(json.dumps(subscribe_message))
-            print("Subscription message sent successfully")
+            print(f"Subscription message sent successfully for {len(instrument_list)} instruments")
         else:
-            print("Could not subscribe to market data - Security ID not found")
+            print("Could not subscribe to market data - Security IDs not found")
     
-    def connect(self, security_id, max_retries=3):
+    def connect(self, security_ids, max_retries=3):
         """Connect to Dhan WebSocket API"""
-        self.security_id = security_id
+        # Store security_ids for subscription
+        if isinstance(security_ids, dict):
+            self.security_ids = security_ids
+        elif isinstance(security_ids, list):
+            # Convert list to dict with index as key if needed
+            self.security_ids = {f"symbol_{i}": sid for i, sid in enumerate(security_ids)}
+        else:
+            # Single security_id case for backward compatibility
+            self.security_ids = {"symbol": security_ids}
+        
+        print(f"DEBUG: Stored security_ids: {self.security_ids}")
         retry_count = 0
         
         while retry_count < max_retries:
@@ -119,15 +138,45 @@ class MarketDataWebSocket:
         """Check if WebSocket is connected"""
         return hasattr(self.ws, 'sock') and self.ws.sock is not None
 
-def process_ticker_data(data, security_id, callback):
-    """Process ticker data packet"""
+def parse_websocket_message_header(data):
+    """Parse WebSocket message header to extract metadata"""
+    try:
+        if len(data) < 8:
+            return None
+            
+        # Extract header information
+        feed_code = data[0]  # 1 byte
+        message_length = data[1]  # 1 byte
+        exchange = int.from_bytes(data[2:4], byteorder='little')  # 2 bytes
+        security_id = int.from_bytes(data[4:8], byteorder='little')  # 4 bytes
+        
+        return {
+            'feed_code': feed_code,
+            'message_length': message_length,
+            'exchange': exchange,
+            'security_id': security_id
+        }
+    except Exception as e:
+        print(f"Error parsing message header: {e}")
+        return None
+
+def process_ticker_data(data, security_id=None, callback=None):
+    """Process ticker data packet for multiple tickers"""
     try:
         if len(data) < 16:
             print(f"Invalid ticker packet length: {len(data)}")
             return
             
+        # Parse message header to extract security_id if not provided
+        header = parse_websocket_message_header(data)
+        if not header:
+            return
+            
+        # Use provided security_id or extract from message
+        actual_security_id = security_id if security_id is not None else header['security_id']
+        
         # Check message type - only process ticker data (\x02)
-        if len(data) > 0 and data[0] != 0x02:
+        if header['feed_code'] != 0x02:
             return
             
         # Extract LTP and LTT from payload (after 8-byte header)
@@ -143,23 +192,53 @@ def process_ticker_data(data, security_id, callback):
             # Use current system time with timezone awareness
             timestamp = datetime.now(pytz.timezone('Asia/Kolkata'))
             
-            # Print LTP with timestamp
-            print(f"LTP: {ltp:.2f} | Time: {timestamp.strftime('%H:%M:%S')}")
+            # Print LTP with timestamp and security_id
+            print(f"Security ID: {actual_security_id} | LTP: {ltp:.2f} | Time: {timestamp.strftime('%H:%M:%S')}")
             
             # Call the callback function with processed data
             if callback:
-                callback(ltp, timestamp, security_id)
+                callback(ltp, timestamp, actual_security_id)
         else:
             print(f"Invalid ticker payload length: {len(payload)}")
     except Exception as e:
         print(f"Error processing ticker data: {e}")
 
-def process_quote_data(data, security_id):
-    """Process quote data packet"""
-    print(f"Quote data received for Security ID: {security_id}")
-    # TODO: Implement quote data processing if needed
+def process_quote_data(data, security_id=None):
+    """Process quote data packet for multiple tickers"""
+    try:
+        # Parse message header to extract security_id if not provided
+        header = parse_websocket_message_header(data)
+        if not header:
+            return
+            
+        # Use provided security_id or extract from message
+        actual_security_id = security_id if security_id is not None else header['security_id']
+        
+        # Check message type - only process quote data (\x04)
+        if header['feed_code'] != 0x04:
+            return
+            
+        print(f"Quote data received for Security ID: {actual_security_id}")
+        # TODO: Implement quote data processing if needed
+    except Exception as e:
+        print(f"Error processing quote data: {e}")
 
-def process_market_depth(data, security_id):
-    """Process market depth packet"""
-    print(f"Market depth received for Security ID: {security_id}")
-    # TODO: Implement market depth processing if needed
+def process_market_depth(data, security_id=None):
+    """Process market depth packet for multiple tickers"""
+    try:
+        # Parse message header to extract security_id if not provided
+        header = parse_websocket_message_header(data)
+        if not header:
+            return
+            
+        # Use provided security_id or extract from message
+        actual_security_id = security_id if security_id is not None else header['security_id']
+        
+        # Check message type - only process market depth data (\x06)
+        if header['feed_code'] != 0x06:
+            return
+            
+        print(f"Market depth received for Security ID: {actual_security_id}")
+        # TODO: Implement market depth processing if needed
+    except Exception as e:
+        print(f"Error processing market depth: {e}")

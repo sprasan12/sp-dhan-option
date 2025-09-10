@@ -46,6 +46,7 @@ class DualModeTradingBot:
         self.config = TradingConfig()
         self.config.validate_config()
         self.config.print_config()
+        self.security_ids = {}
         
         # Initialize symbol-specific logger
         log_level = getattr(logging, self.config.log_level, logging.INFO)
@@ -549,7 +550,7 @@ class DualModeTradingBot:
         """Setup live trading WebSocket"""
         if self.config.is_live_mode():
             # Get security IDs for all symbols
-            self.security_ids = {}
+
             for symbol in self.symbols:
                 security_id = self.broker.get_security_id(symbol, self.instruments_df)
                 if not security_id:
