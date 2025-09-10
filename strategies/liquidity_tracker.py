@@ -58,7 +58,7 @@ class LiquidityTracker:
     
     def add_historical_data(self, candles_5min: List[Candle], candles_15min: List[Candle], symbol: str = "Unknown"):
         """
-        Process historical data to identify and store all liquidity zones
+        Process historical data to identify and store all liquidity zones with 2-pass mitigation check
         
         Args:
             candles_5min: List of 5-minute candles
@@ -68,29 +68,38 @@ class LiquidityTracker:
         if self.logger:
             self.logger.info(f"Processing historical data for {symbol}: {len(candles_5min)} 5min candles, {len(candles_15min)} 15min candles")
         
-        # Process 5-minute candles
+        # 1st Pass: Process 5-minute candles to detect FVGs/IFVGs
         self._process_candles_for_fvgs(candles_5min, "5min", symbol)
         self._process_candles_for_implied_fvgs(candles_5min, "5min", symbol)
         self._process_candles_for_previous_highs_lows(candles_5min, "5min", symbol)
         self._process_candles_for_swing_lows(candles_5min, "5min", symbol)
         self._process_candles_for_swing_highs(candles_5min, "5min", symbol)
         
-        # Process 15-minute candles
+        # 1st Pass: Process 15-minute candles to detect FVGs/IFVGs
         self._process_candles_for_fvgs(candles_15min, "15min", symbol)
         self._process_candles_for_implied_fvgs(candles_15min, "15min", symbol)
         self._process_candles_for_previous_highs_lows(candles_15min, "15min", symbol)
         self._process_candles_for_swing_lows(candles_15min, "15min", symbol)
         self._process_candles_for_swing_highs(candles_15min, "15min", symbol)
         
+        # 2nd Pass: Check for mitigation in 5m timeframe
+        if len(candles_5min) >= 3:
+            self._check_historical_mitigation(candles_5min, "5min", symbol)
+        
+        # 2nd Pass: Check for mitigation in 15m timeframe
+        if len(candles_15min) >= 3:
+            self._check_historical_mitigation(candles_15min, "15min", symbol)
+        
         # Sort all price lists for efficient lookup
         self._sort_price_lists()
         
         if self.logger:
-            self.logger.info(f"Liquidity zones identified:")
-            self.logger.info(f"  Bullish FVGs: {len(self.bullish_fvgs)}")
-            self.logger.info(f"  Bearish FVGs: {len(self.bearish_fvgs)}")
-            self.logger.info(f"  Bullish IFVGs: {len(self.bullish_ifvgs)}")
-            self.logger.info(f"  Bearish IFVGs: {len(self.bearish_ifvgs)}")
+            summary = self.get_liquidity_summary()
+            self.logger.info(f"Liquidity zones identified after 2-pass processing:")
+            self.logger.info(f"  Active Bullish FVGs: {summary['bullish_fvgs']}")
+            self.logger.info(f"  Active Bearish FVGs: {summary['bearish_fvgs']}")
+            self.logger.info(f"  Active Bullish IFVGs: {summary['bullish_ifvgs']}")
+            self.logger.info(f"  Active Bearish IFVGs: {summary['bearish_ifvgs']}")
             self.logger.info(f"  Previous Highs: {len(self.previous_highs)}")
             self.logger.info(f"  Previous Lows: {len(self.previous_lows)}")
             for zone in self.swing_highs:
@@ -117,7 +126,8 @@ class LiquidityTracker:
                     price_low=candles[i].high,
                     timestamp=candles[i].timestamp,
                     candle=candles[i],
-                    midpoint=midpoint
+                    midpoint=midpoint,
+                    symbol=symbol
                 )
                 self.bullish_fvgs.append(zone)
                 
@@ -136,7 +146,8 @@ class LiquidityTracker:
                     price_low=candles[i+2].high,
                     timestamp=candles[i].timestamp,
                     candle=candles[i],
-                    midpoint=midpoint
+                    midpoint=midpoint,
+                    symbol=symbol
                 )
                 self.bearish_fvgs.append(zone)
                 
@@ -155,7 +166,8 @@ class LiquidityTracker:
                 price_low=ifvg['price_low'],
                 timestamp=ifvg['timestamp'],
                 candle=ifvg['candle'],
-                midpoint=ifvg['midpoint']
+                midpoint=ifvg['midpoint'],
+                symbol=symbol
             )
             self.bullish_ifvgs.append(zone)
             
@@ -170,7 +182,8 @@ class LiquidityTracker:
                 price_low=ifvg['price_low'],
                 timestamp=ifvg['timestamp'],
                 candle=ifvg['candle'],
-                midpoint=ifvg['midpoint']
+                midpoint=ifvg['midpoint'],
+                symbol=symbol
             )
             self.bearish_ifvgs.append(zone)
             
@@ -362,6 +375,55 @@ class LiquidityTracker:
         nearest = min(bullish_zones, key=lambda x: abs(x.midpoint - price))
         return nearest
     
+    def _check_historical_mitigation(self, candles: List[Candle], timeframe: str, symbol: str = "Unknown"):
+        """
+        Check for mitigation of FVGs/IFVGs within the same timeframe during historical processing
+        
+        Args:
+            candles: List of candles in the timeframe
+            timeframe: Timeframe string (5min or 15min)
+            symbol: Symbol name for logging
+        """
+        if not candles or len(candles) < 3:
+            return
+        
+        mitigated_count = 0
+        
+        # Get all FVGs and IFVGs for this timeframe
+        timeframe_bullish_fvgs = [zone for zone in self.bullish_fvgs + self.bullish_ifvgs if timeframe in zone.zone_type]
+        timeframe_bearish_fvgs = [zone for zone in self.bearish_fvgs + self.bearish_ifvgs if timeframe in zone.zone_type]
+        
+        if self.logger:
+            self.logger.debug(f"Checking historical mitigation for {symbol} {timeframe}: {len(timeframe_bullish_fvgs)} Bullish I/FVGs, {len(timeframe_bearish_fvgs)} BearishI/FVGs")
+        
+        # Check each candle against all FVGs/IFVGs that were created before it
+        for candle in candles:
+            for zone in timeframe_bullish_fvgs:
+                # Only check zones that were created before this candle
+                if not zone.mitigated and zone.timestamp < candle.timestamp:
+                    # Check if candle touches the midpoint (mitigation condition)
+                    if candle.low <= zone.midpoint <= candle.high:
+                        zone.mitigated = True
+                        zone.mitigation_timestamp = candle.timestamp
+                        mitigated_count += 1
+                        
+                        if self.logger:
+                            self.logger.debug(f"Historical {zone.zone_type} mitigated at {candle.timestamp.strftime('%H:%M:%S')} - Price: {zone.midpoint:.2f}")
+            for zone in timeframe_bearish_fvgs:
+                # Only check zones that were created before this candle
+                if not zone.mitigated and zone.timestamp < candle.timestamp:
+                    # Check if candle touches the midpoint (mitigation condition)
+                    if candle.high >= zone.midpoint >= candle.low:
+                        zone.mitigated = True
+                        zone.mitigation_timestamp = candle.timestamp
+                        mitigated_count += 1
+
+                        if self.logger:
+                            self.logger.debug(
+                                f"Historical {zone.zone_type} mitigated at {candle.timestamp.strftime('%H:%M:%S')} - Price: {zone.midpoint:.2f}")
+        if mitigated_count > 0 and self.logger:
+            self.logger.info(f"Marked {mitigated_count} {timeframe} liquidity zones as mitigated during historical processing for {symbol}")
+    
     def check_and_mark_mitigation(self, current_candle: Candle):
         """
         Check if any FVGs/IFVGs have been mitigated by the current candle
@@ -386,7 +448,7 @@ class LiquidityTracker:
         # Check bearish FVGs/IFVGs (mitigated if current candle touches their midpoint)
         for zone in self.bearish_fvgs + self.bearish_ifvgs:
             if not zone.mitigated and zone.timestamp < current_candle.timestamp:
-                if current_candle.low <= zone.midpoint <= current_candle.high:
+                if current_candle.high >= zone.midpoint >= current_candle.low:
                     zone.mitigated = True
                     zone.mitigation_timestamp = current_candle.timestamp
                     mitigated_count += 1
@@ -409,30 +471,34 @@ class LiquidityTracker:
             'total_zones': len([z for z in self.bullish_fvgs + self.bearish_fvgs + self.bullish_ifvgs + self.bearish_ifvgs if not z.mitigated])
         }
     
-    def get_bullish_fvgs(self) -> List[Dict]:
-        """Get all active bullish FVGs as dictionaries"""
+    def get_bullish_fvgs(self, symbol: str = None) -> List[Dict]:
+        """Get all active bullish FVGs as dictionaries, optionally filtered by symbol"""
         return [
             {
                 'upper': zone.price_high,
                 'lower': zone.price_low,
                 'midpoint': (zone.price_high + zone.price_low) / 2,
                 'timestamp': zone.timestamp,
-                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown'
+                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown',
+                'symbol': zone.symbol
             }
-            for zone in self.bullish_fvgs if not zone.mitigated
+            for zone in self.bullish_fvgs 
+            if not zone.mitigated and (symbol is None or zone.symbol == symbol)
         ]
     
-    def get_bullish_ifvgs(self) -> List[Dict]:
-        """Get all active bullish IFVGs as dictionaries"""
+    def get_bullish_ifvgs(self, symbol: str = None) -> List[Dict]:
+        """Get all active bullish IFVGs as dictionaries, optionally filtered by symbol"""
         return [
             {
                 'upper': zone.price_high,
                 'lower': zone.price_low,
                 'midpoint': (zone.price_high + zone.price_low) / 2,
                 'timestamp': zone.timestamp,
-                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown'
+                'timeframe': zone.zone_type.split('_')[1] if '_' in zone.zone_type else 'unknown',
+                'symbol': zone.symbol
             }
-            for zone in self.bullish_ifvgs if not zone.mitigated
+            for zone in self.bullish_ifvgs 
+            if not zone.mitigated and (symbol is None or zone.symbol == symbol)
         ]
     
     def get_swing_highs(self) -> List[float]:

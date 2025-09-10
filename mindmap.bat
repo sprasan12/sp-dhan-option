@@ -1,0 +1,1 @@
+python .\code2mindmap.py --root "C:\Sarada\ICT\DhanOptionV2" --out-mermaid ".\map.md" --out-freemind ".\map.mm" --include-ext ".py,.js,.ts,.java" --exclude-dirs ".git,node_modules,dist,build,__pycache__,venv,.venv"

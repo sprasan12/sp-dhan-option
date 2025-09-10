@@ -16,6 +16,8 @@ class TradingMode(Enum):
 class StrategyMode(Enum):
     CANDLE_STRATEGY = "candle_strategy"
     ERL_TO_IRL = "erl_to_irl"
+    IRL_TO_ERL = "irl_to_erl"
+    BOTH = "both"
 
 class TradingConfig:
     """Configuration class for trading bot settings"""
@@ -34,7 +36,7 @@ class TradingConfig:
         
         # Account management settings
         self.account_start_balance = float(os.getenv('ACCT_START_BALANCE', 50000))  # Starting balance in INR
-        self.fixed_sl_percentage = float(os.getenv('FIXED_SL_PERCENTAGE', 10.0))  # Fixed SL as percentage of account balance
+        self.fixed_sl_percentage = float(os.getenv('FIXED_SL_PERCENTAGE', 20.0))  # Fixed SL as percentage of account balance
         self.lot_size = int(os.getenv('LOT_SIZE', 75))  # Quantity per lot
         self.max_sl_percentage_of_price = float(os.getenv('MAX_SL_PERCENTAGE_OF_PRICE', 25.0))  # Max SL as percentage of market price
         
@@ -93,7 +95,15 @@ class TradingConfig:
     
     def is_erl_to_irl_strategy(self):
         """Check if ERL to IRL strategy is enabled"""
-        return self.strategy_mode == StrategyMode.ERL_TO_IRL
+        return self.strategy_mode == StrategyMode.ERL_TO_IRL or self.strategy_mode == StrategyMode.BOTH
+    
+    def is_irl_to_erl_strategy(self):
+        """Check if IRL to ERL strategy is enabled"""
+        return self.strategy_mode == StrategyMode.IRL_TO_ERL or self.strategy_mode == StrategyMode.BOTH
+    
+    def is_both_strategies(self):
+        """Check if both strategies are enabled"""
+        return self.strategy_mode == StrategyMode.BOTH
     
     def get_demo_start_datetime(self):
         """Get demo start datetime with a specific time during market hours"""

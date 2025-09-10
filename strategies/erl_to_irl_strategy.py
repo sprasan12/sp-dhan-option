@@ -14,11 +14,16 @@ from strategies.candle_strategy import CandleStrategy
 class ERLToIRLStrategy(CandleStrategy):
     """Main strategy class for ERL to IRL trading"""
     
-    def __init__(self, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None):
+    def __init__(self, symbol: str, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None):
         super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
+        self.symbol = symbol
         self.tick_size = tick_size
         self.swing_look_back = swing_look_back
         #self.logger = logger
+        
+        # Debug logging
+        if self.logger:
+            self.logger.info(f"ERL_to_IRL Strategy initialized with symbol: {self.symbol}")
         
         # Initialize components
         self.liquidity_tracker = LiquidityTracker(logger)
@@ -35,7 +40,7 @@ class ERLToIRLStrategy(CandleStrategy):
     
     def initialize_with_historical_data(self, symbol: str, historical_data: Dict[str, List[Candle]]):
         """
-        Initialize the strategy with 10 days of historical data
+        Initialize the strategy with  days of historical data
         
         Args:
             symbol: Trading symbol
@@ -64,6 +69,7 @@ class ERLToIRLStrategy(CandleStrategy):
         if self.logger:
             summary = self.liquidity_tracker.get_liquidity_summary()
             self.logger.info(f"Strategy initialized with {summary['total_zones']} active liquidity zones")
+            self.logger.info(f"✅ ERL to IRL strategy initialized for {self.symbol}")
         
         return True
     
@@ -149,27 +155,7 @@ class ERLToIRLStrategy(CandleStrategy):
         
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_15m)
-    
-    def update_price(self, price: float, timestamp: datetime):
-        """
-        Update strategy with current price
-        
-        Args:
-            price: Current price
-            timestamp: Current timestamp
-        """
-        if not self.initialized:
-            return
-        
-        # This method can be used for price-based updates
-        # For now, it's a placeholder for future enhancements
-        pass
 
-    def set_callbacks(self, entry_callback=None, exit_callback=None):
-        """Set entry and exit callbacks"""
-        self.entry_callback = entry_callback
-        self.exit_callback = exit_callback
-    
     def get_strategy_status(self) -> Dict:
         """Get current strategy status"""
         return {

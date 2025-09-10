@@ -5,6 +5,7 @@ Manages separate CandleStrategy instances for each symbol
 
 from strategies.candle_strategy import CandleStrategy
 from utils.market_utils import round_to_tick
+from utils.logger_wrapper import LoggerWrapper
 
 class SymbolManager:
     """Manages multiple symbol strategies for dual trading"""
@@ -21,10 +22,13 @@ class SymbolManager:
         # Create separate strategy instances for each symbol
         self.strategies = {}
         for symbol in symbols:
+            # Create symbol-specific logger wrapper
+            symbol_logger = LoggerWrapper(logger, symbol) if logger else None
+            
             self.strategies[symbol] = CandleStrategy(
                 tick_size=tick_size,
                 swing_look_back=swing_look_back,
-                logger=logger,
+                logger=symbol_logger,
                 exit_callback=self._create_symbol_exit_callback(symbol),
                 entry_callback=self._create_symbol_entry_callback(symbol)
             )

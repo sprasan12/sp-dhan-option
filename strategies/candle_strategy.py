@@ -20,13 +20,21 @@ class CandleStrategy:
         self.entry_callback = entry_callback  # Callback to notify when trade entry is triggered
         
         # Strategy parameters
-        self.fifteen_min_candles = deque(maxlen=50)  # Store 15-minute candles
-        self.one_min_candles = deque(maxlen=100)     # Store 1-minute candles for sweep detection
+        self.fifteen_min_candles = deque(maxlen=100)  # Store 15-minute candles
+        self.one_min_candles = deque(maxlen=1500)
+        self.five_min_candles = deque(maxlen=300)# Store 1-minute candles for sweep detection
         self.current_15min_candle = None
         self.current_5min_candle = None
         self.current_1min_candle = None
         self.sweep_detected = False
         self.sweep_low = None
+        
+        # Session tracking
+        self.session_high = None
+        self.session_low = None
+        self.session_high_time = None
+        self.session_low_time = None
+        self.days_low_swept = False
         self.waiting_for_sweep = False
         self.sweep_target_set_time = None  # Track when the target was set
         self.recovery_low = None  # Track the lowest point after sweep
@@ -248,10 +256,12 @@ class CandleStrategy:
                 if self.logger:
                     self.logger.log_5min_candle_completion(self.current_5min_candle)
                 else:
-                    print(f"\n🕯️ 5-Min Candle Completed: {self.current_5min_candle}")
-                    print(
-                        f"   Body: {self.current_5min_candle.body_size():.2f} ({self.current_5min_candle.body_percentage():.1f}%)")
+                    print(f"🕯️ 5-MINUTE CANDLE COMPLETED")
+                    print(f"   Time: {self.current_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                    print(f"   OHLC: O:{self.current_5min_candle.open:.2f} H:{self.current_5min_candle.high:.2f} L:{self.current_5min_candle.low:.2f} C:{self.current_5min_candle.close:.2f}")
+                    print(f"   Body: {self.current_5min_candle.body_size():.2f} ({self.current_5min_candle.body_percentage():.1f}%)")
                     print(f"   Type: {self.get_candle_type(self.current_5min_candle)}")
+                    print("--------------------------------------------------")
 
             # Create new 5-minute candle with 1-minute candle data
             self.current_5min_candle = Candle(candle_start_time, one_min_candle.open, one_min_candle.high,
@@ -354,6 +364,10 @@ class CandleStrategy:
             
             # Create new 1-minute candle
             self.current_1min_candle = Candle(candle_start_time, price, price, price, price)
+            
+            # Update session high/low
+            self.update_session_high_low(price, candle_start_time)
+            
             print(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
         else:
             # Update existing 1-minute candle
@@ -362,6 +376,9 @@ class CandleStrategy:
             self.current_1min_candle.high = max(self.current_1min_candle.high, price)
             self.current_1min_candle.low = min(self.current_1min_candle.low, price)
             self.current_1min_candle.close = price
+            
+            # Update session high/low
+            self.update_session_high_low(price, timestamp)
             
             # Check for target/SL hits during candle formation (if in trade)
             if self.in_trade:
@@ -427,7 +444,10 @@ class CandleStrategy:
                     self.logger.log_1min_candle_completion(self.current_1min_candle)
                 else:
                     print(f"📊 1-Min Candle Completed: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')} - O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
-                
+
+                # Update 5-minute candle with this completed 1-minute candle
+                self.update_5min_candle_from_1min(self.current_1min_candle)
+
                 # Update 15-minute candle with this completed 1-minute candle
                 self.update_15min_candle_from_1min(self.current_1min_candle)
                 
@@ -459,6 +479,11 @@ class CandleStrategy:
             
             # Create new 1-minute candle with complete OHLC data
             self.current_1min_candle = Candle(candle_start_time, open_price, high_price, low_price, close_price)
+            
+            # Update session high/low
+            self.update_session_high_low(high_price, candle_start_time)
+            self.update_session_high_low(low_price, candle_start_time)
+            
             print(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{open_price:.2f} H:{high_price:.2f} L:{low_price:.2f} C:{close_price:.2f}")
         else:
             # Update existing 1-minute candle with complete OHLC data
@@ -573,6 +598,24 @@ class CandleStrategy:
                 self.sweep_detected = True
                 self.recovery_low = one_min_candle.low  # Initialize recovery low with sweep low
                 
+                # Check if this is a day's low sweep
+                is_days_low = self.is_days_low_sweep(one_min_candle.low)
+                if is_days_low:
+                    self.days_low_swept = True
+                
+                # Check if this is a potential swing low (for 5m/15m candles)
+                is_potential_swing = False
+                if len(self.fifteen_min_candles) > 1:
+                    # Check if the 15m candle being swept is a potential swing low
+                    for i, candle in enumerate(self.fifteen_min_candles):
+                        if abs(candle.low - self.sweep_low) < 0.1:  # Found the candle being swept
+                            is_potential_swing = self.is_potential_swing_low(i, list(self.fifteen_min_candles))
+                            break
+                
+                # Calculate target ratio
+                target_ratio = self.calculate_target_ratio(one_min_candle.low, is_potential_swing, is_days_low)
+                self.current_target_ratio = target_ratio  # Store for use in FVG/CISD detection
+                
                 if self.logger:
                     candle_data = {
                         'open': one_min_candle.open,
@@ -590,6 +633,9 @@ class CandleStrategy:
                     self.logger.info(f"   Target Low: {self.sweep_low:.2f}")
                     self.logger.info(f"   Recovery Low: {self.recovery_low:.2f}")
                     self.logger.info(f"   Sweep Time: {one_min_candle.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   Day's Low Sweep: {'✅' if is_days_low else '❌'}")
+                    self.logger.info(f"   Potential Swing Low: {'✅' if is_potential_swing else '❌'}")
+                    self.logger.info(f"   Target Ratio: {target_ratio:.1f}:1")
                     self.logger.info(f"   🔍 Looking for IMPS/CISD...")
             else:
                 # Update recovery low if this candle goes lower
@@ -665,15 +711,25 @@ class CandleStrategy:
         # Check for bullish FVG (c3.low > c1.high)
         if c3.low > c1.high:
             gap_size = c3.low - c1.high
-            # Calculate target (entry + 2x gap size for 1:2 RR)
-            target = c3.close + (2 * gap_size)
+            # Calculate target based on sweep type
+            # Get the target ratio from sweep detection
+            target_ratio = getattr(self, 'current_target_ratio', 2.0)  # Default to 2:1
+            entry = c3.close
+            stop_loss = c1.high  # Stop loss is the lower bound of the FVG
+            risk = entry - stop_loss
+            target = entry + (target_ratio * risk)
+            
+            trigger_symbol = getattr(self, 'symbol', 'Unknown')
+            if self.logger:
+                self.logger.info(f"Creating trigger with symbol: {trigger_symbol} (self.symbol = {getattr(self, 'symbol', 'NOT_SET')})")
             
             fvg = {
                 'type': 'bullish',
                 'gap_size': gap_size,
-                'entry': c3.close,
-                'stop_loss': self.recovery_low,  # Stop loss is the lowest point (recovery low)
+                'entry': entry,
+                'stop_loss': stop_loss,  # Stop loss is the lower bound of the FVG
                 'target': target,
+                'symbol': trigger_symbol,
                 'candles': [c1, c2, c3]
             }
             
@@ -759,15 +815,17 @@ class CandleStrategy:
                 # Find the lowest low among all tracked bear candles
                 lowest_bear_low = min([candle.low for candle in self.last_bear_candles])
                 
-                # Calculate target (entry + 2x risk for 1:2 RR)
+                # Calculate target based on sweep type
                 risk = current_price - lowest_bear_low
-                target = current_price + (2 * risk)
+                target_ratio = getattr(self, 'current_target_ratio', 2.0)  # Default to 2:1
+                target = current_price + (target_ratio * risk)
                 
                 cisd_trigger = {
                     'type': 'CISD',
                     'entry': current_price,
                     'stop_loss': lowest_bear_low,  # Stop loss is low of lowest tracked bear candle
                     'target': target,
+                    'symbol': getattr(self, 'symbol', 'Unknown'),
                     'bear_candle': bear_candle,
                     'lowest_bear_low': lowest_bear_low
                 }
@@ -806,6 +864,47 @@ class CandleStrategy:
         self.recovery_low = None
         self.sweep_target_set_time = None
     
+    def update_session_high_low(self, price, timestamp):
+        """Update session high and low prices"""
+        if self.session_high is None or price > self.session_high:
+            self.session_high = price
+            self.session_high_time = timestamp
+            if self.logger:
+                self.logger.info(f"📈 New Session High: {price:.2f} at {timestamp.strftime('%H:%M:%S')}")
+        
+        if self.session_low is None or price < self.session_low:
+            self.session_low = price
+            self.session_low_time = timestamp
+            if self.logger:
+                self.logger.info(f"📉 New Session Low: {price:.2f} at {timestamp.strftime('%H:%M:%S')}")
+    
+    def is_potential_swing_low(self, candle_index, candles_list):
+        """Check if a candle is a potential swing low (lower than left candle)"""
+        if candle_index <= 0 or candle_index >= len(candles_list) - 1:
+            return False
+        
+        current_candle = candles_list[candle_index]
+        left_candle = candles_list[candle_index - 1]
+        
+        # Check if current low is lower than left candle low
+        return current_candle.low < left_candle.low
+    
+    def is_days_low_sweep(self, sweep_price):
+        """Check if the sweep is of the day's low"""
+        if self.session_low is None:
+            return False
+        
+        # Consider it a day's low sweep if within 0.5% of session low
+        tolerance = self.session_low * 0.005
+        return abs(sweep_price - self.session_low) <= tolerance
+    
+    def calculate_target_ratio(self, sweep_price, is_potential_swing, is_days_low):
+        """Calculate target ratio based on sweep type"""
+        if is_days_low or is_potential_swing:
+            return 2.0  # 2:1 ratio for day's low or potential swing low
+        else:
+            return 1.0  # 1:1 ratio for simple sweeps
+    
     def get_strategy_status(self):
         """Get current strategy status for monitoring"""
         return {
@@ -831,9 +930,14 @@ class CandleStrategy:
         self.current_target = target
         
         if self.logger:
+            # Debug: confirm trade state set on this instance
+            try:
+                self.logger.debug(f"ENTER_TRADE: symbol={getattr(self, 'symbol', 'Unknown')} in_trade={self.in_trade} entry={entry_price} sl={stop_loss} tgt={target} id={id(self)}")
+            except Exception:
+                pass
             self.logger.log_trade_entry(
                 entry_price, stop_loss, target,
-                "STRATEGY", "N/A"
+                "STRATEGY"
             )
         else:
             print(f"🎯 TRADE ENTERED!")

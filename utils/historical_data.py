@@ -279,7 +279,7 @@ class HistoricalDataFetcher:
             interval="5min"
         )
     
-    def fetch_10_days_historical_data(self, symbol: str, instruments_df: pd.DataFrame,
+    def fetch_historical_data_v2(self, symbol: str, instruments_df: pd.DataFrame,
                                        reference_date: datetime = None, hist_days: float = 1.0) -> Dict[str, Optional[pd.DataFrame]]:
         """
         Fetch 10 days of historical data for both 5min and 15min timeframes
@@ -288,21 +288,22 @@ class HistoricalDataFetcher:
         Args:
             symbol: Trading symbol
             instruments_df: Instruments dataframe
-            reference_date: Reference date to calculate 10 days back from (default: current time)
+            reference_date: Reference date to calculate hist_days days back from (default: current time)
+            hist_days: Number of calendar days to look back (default: 1.0)
         
         Returns:
             Dictionary with '5min' and '15min' DataFrames
         """
         from datetime import datetime, timedelta
         
-        # Calculate date range (10 trading days back from reference date)
+        # Calculate date range ( hist_days trading days back from reference date)
         if reference_date is None:
             reference_date = datetime.now()
         
         end_date = reference_date
         start_date = end_date - timedelta(days=hist_days) # 14 calendar days to ensure 10 trading days
         
-        print(f"Fetching 10 days of historical data for {symbol}")
+        print(f"Fetching {hist_days} days of historical data for {symbol}")
         print(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
         
         # Fetch 5-minute candles
