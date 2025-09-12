@@ -1,21 +1,21 @@
 """
-Demo server for streaming historical market data
+Demo server for streaming historical market data with new architecture
 """
 
 import json
 import time
 import threading
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 import pandas as pd
 
 class DemoServer:
-    """Demo server for streaming historical market data"""
+    """Demo server for streaming historical market data with strategy integration"""
     
     def __init__(self, historical_data: pd.DataFrame, start_date: datetime, 
-                 interval_minutes: int = 1, port: int = 8080, stream_interval_seconds: float = 1.0):
+                 interval_minutes: int = 1, port: int = 8080, stream_interval_seconds: float = 2.0):
         self.historical_data = historical_data
         self.start_date = start_date
         self.interval_minutes = interval_minutes
@@ -35,6 +35,9 @@ class DemoServer:
         # Data tracking
         self.current_candle_index = 0
         self.streamed_candles = []
+        
+        # Data callback for external processing
+        self.data_callback = None
         
     def setup_routes(self):
         """Setup Flask routes"""
@@ -103,6 +106,7 @@ class DemoServer:
                     return jsonify({"error": "Invalid timestamp format"})
             else:
                 return jsonify({"error": "timestamp parameter required"})
+        
     
     def start_simulation(self):
         """Start the simulation thread"""
@@ -111,14 +115,16 @@ class DemoServer:
             self.simulation_thread = threading.Thread(target=self._simulation_loop)
             self.simulation_thread.daemon = True
             self.simulation_thread.start()
-            print(f"Demo simulation started at {self.current_sim_time}")
+            print(f"🚀 DEMO SIMULATION STARTED at {self.current_sim_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"📊 Total candles to stream: {len(self.historical_data)}")
+            print(f"⏱️  Stream interval: {self.stream_interval_seconds} seconds per candle")
     
     def stop_simulation(self):
         """Stop the simulation"""
         self.simulation_running = False
         if self.simulation_thread:
             self.simulation_thread.join(timeout=1)
-        print("Demo simulation stopped")
+        print(f"🛑 DEMO SIMULATION STOPPED - Streamed {len(self.streamed_candles)} candles")
     
     def reset_simulation(self):
         """Reset simulation to start"""
@@ -140,8 +146,12 @@ class DemoServer:
         
         print(f"Demo simulation time set to {new_time}")
     
+    def set_data_callback(self, data_callback: Callable):
+        """Set callback for data events"""
+        self.data_callback = data_callback
+    
     def _simulation_loop(self):
-        """Main simulation loop"""
+        """Main simulation loop - just streams candles"""
         while self.simulation_running and self.current_candle_index < len(self.historical_data):
             try:
                 # Get current candle
@@ -173,7 +183,11 @@ class DemoServer:
                 except Exception as e:
                     readable_time = f"Invalid timestamp: {candle['timestamp']}"
                 
-                print(f"Streaming candle: {readable_time} - Close: {candle_data['close']} Low: {candle_data['low']}")
+                print(f"📡 STREAMING CANDLE: {readable_time} | O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
+                
+                # Call data callback for external processing (like strategy manager)
+                if self.data_callback:
+                    self.data_callback(candle_data, candle['timestamp'])
                 
                 # Move to next candle
                 self.current_candle_index += 1

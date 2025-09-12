@@ -1,6 +1,6 @@
 """
-Clean Trading Bot - Single Symbol, Simple Architecture
-Supports Live Trading and Demo Trading with clean, extensible design
+New Architecture Trading Bot
+Uses CandleData + StrategyManager for clean separation of concerns
 """
 
 import os
@@ -12,12 +12,11 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 import pytz
 
-# Import our clean components
+# Import our new components
 from models.candle import Candle
 from utils.market_utils import is_market_hours, is_trading_ending, round_to_tick
-from strategies.candle_strategy import CandleStrategy
-from strategies.erl_to_irl_strategy import ERLToIRLStrategy
-from strategies.irl_to_erl_strategy import IRLToERLStrategy
+from strategies.candle_data import CandleData
+from strategies.strategy_manager import StrategyManager
 from demo.demo_server import DemoServer
 from demo.demo_data_client import DemoDataClient
 from brokers.dhan_broker import DhanBroker
@@ -33,13 +32,12 @@ import logging
 # Load environment variables
 load_dotenv()
 
-class TradingBot:
-    """Clean trading bot for single symbol trading"""
+class NewArchitectureTradingBot:
+    """Trading bot using new architecture with CandleData + StrategyManager"""
     
     def __init__(self):
         # Load configuration
         self.config = TradingConfig()
-        self.config.validate_config()
         self.config.print_config()
         
         # Initialize logger
@@ -71,7 +69,6 @@ class TradingBot:
             )
         else:
             # For demo mode, we still need credentials to fetch historical data
-            # Use environment variables or default values
             access_token = os.getenv('DHAN_ACCESS_TOKEN', 'demo_token')
             client_id = os.getenv('DHAN_CLIENT_ID', 'demo_client')
             self.historical_fetcher = HistoricalDataFetcher(
@@ -79,8 +76,18 @@ class TradingBot:
                 client_id=client_id
             )
         
-        # Initialize strategy based on mode
-        self.strategy = self._initialize_strategy()
+        # Initialize strategy manager (this will create CandleData internally)
+        self.strategy_manager = StrategyManager(
+            symbol=self.config.symbol,
+            tick_size=self.config.tick_size,
+            logger=self.logger
+        )
+        
+        # Set callbacks for trade management
+        self.strategy_manager.set_callbacks(
+            entry_callback=self._on_strategy_trade_entry,
+            exit_callback=self._on_strategy_trade_exit
+        )
         
         # Market data
         self.instruments_df = None
@@ -88,56 +95,13 @@ class TradingBot:
         self.demo_server = None
         self.demo_client = None
         
-        # Data storage
-        self.five_min_candles = []
-        self.one_min_candles = []
-        
         # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
         
-        self.logger.info(f"Trading Bot initialized in {self.config.mode.value.upper()} mode")
-        self.logger.info(f"Strategy: {self.config.strategy_mode.value.upper()}")
+        self.logger.info(f"New Architecture Trading Bot initialized in {self.config.mode.value.upper()} mode")
         self.logger.info(f"Symbol: {self.config.symbol}")
         self.logger.info(f"Account Balance: ₹{self.account_manager.get_current_balance():,.2f}")
-    
-    def _initialize_strategy(self):
-        """Initialize the appropriate strategy based on configuration"""
-        if self.config.strategy_mode.value == 'candle_strategy':
-            return CandleStrategy(
-                tick_size=self.config.tick_size,
-                swing_look_back=self.config.swing_look_back,
-                logger=self.logger,
-                exit_callback=self._on_strategy_trade_exit,
-                entry_callback=self._on_strategy_trade_entry
-            )
-        elif self.config.strategy_mode.value == 'erl_to_irl':
-            return ERLToIRLStrategy(
-                symbol=self.config.symbol,
-                    tick_size=self.config.tick_size,
-                logger=self.logger,
-                exit_callback=self._on_strategy_trade_exit,
-                entry_callback=self._on_strategy_trade_entry
-            )
-        elif self.config.strategy_mode.value == 'irl_to_erl':
-            return IRLToERLStrategy(
-                symbol=self.config.symbol,
-                    tick_size=self.config.tick_size,
-                    swing_look_back=self.config.swing_look_back,
-                logger=self.logger,
-                exit_callback=self._on_strategy_trade_exit,
-                entry_callback=self._on_strategy_trade_entry
-            )
-        else:  # both strategies
-            # Create ERL to IRL strategy as primary (can be extended later)
-            return ERLToIRLStrategy(
-                symbol=self.config.symbol,
-                tick_size=self.config.tick_size, 
-                swing_look_back=self.config.swing_look_back,
-                logger=self.logger,
-                exit_callback=self._on_strategy_trade_exit,
-                entry_callback=self._on_strategy_trade_entry
-            )
     
     def _signal_handler(self, signum, frame):
         """Handle shutdown signals gracefully"""
@@ -149,7 +113,7 @@ class TradingBot:
     def start(self):
         """Start the trading bot"""
         try:
-            self.logger.info("Starting trading bot...")
+            self.logger.info("Starting new architecture trading bot...")
             
             # Load instruments
             self._load_instruments()
@@ -185,7 +149,7 @@ class TradingBot:
             raise
     
     def _initialize_historical_data(self):
-        """Initialize historical data for the strategy"""
+        """Initialize historical data for the strategy manager"""
         self.logger.info("Initializing historical data...")
         
         # Determine reference date
@@ -201,7 +165,7 @@ class TradingBot:
         self.logger.info(f"Fetching {hist_days} days of historical data for {self.config.symbol}...")
 
         historical_data = self.historical_fetcher.fetch_historical_data_v2(
-        symbol=self.config.symbol,
+            symbol=self.config.symbol,
             instruments_df=self.instruments_df,
             reference_date=reference_date,
             hist_days=float(hist_days)
@@ -231,24 +195,19 @@ class TradingBot:
                 )
                 candles_1min.append(candle)
 
-            # Initialize strategy with historical data
+            # Initialize strategy manager with historical data
             candle_data = {
                 '5min': candles_5min,
                 '1min': candles_1min
             }
             
             if candles_5min and candles_1min:
-                # Initialize strategy with all historical data
-                if hasattr(self.strategy, 'initialize_with_historical_data'):
-                    # For ERL/IRL strategies that need full historical analysis
-                    self.strategy.initialize_with_historical_data(self.config.symbol, candle_data)
-                    self.logger.info(f"✅ Strategy initialized with {len(candles_5min)} 5-minute candles")
-                    self.logger.info(f"✅ Strategy initialized with {len(candles_1min)} 1-minute candles")
+                success = self.strategy_manager.initialize_with_historical_data(candle_data)
+                if success:
+                    self.logger.info(f"✅ StrategyManager initialized with {len(candles_5min)} 5-minute candles")
+                    self.logger.info(f"✅ StrategyManager initialized with {len(candles_1min)} 1-minute candles")
                 else:
-                    # For basic CandleStrategy, set initial candles
-                    self.strategy.set_initial_5min_candle(candles_5min[-1])
-                    self.strategy.set_initial_1min_candle(candles_1min[-1])
-                    self.logger.info(f"✅ Basic strategy initialized with last candles")
+                    self.logger.error("❌ Failed to initialize StrategyManager")
             else:
                 self.logger.error("❌ No historical data available")
         else:
@@ -262,44 +221,108 @@ class TradingBot:
         """Initialize demo server for backtesting"""
         try:
             # Fetch historical data for demo server
-            historical_data = self.historical_fetcher.fetch_historical_data_v2(
+            from datetime import datetime
+            historical_data = self.historical_fetcher.fetch_1min_candles(
                 symbol=self.config.symbol,
                 instruments_df=self.instruments_df,
-                reference_date=self.config.get_demo_start_datetime(),
-                hist_days=float(self.config.get_num_hist_days())
+                start_date=self.config.get_demo_start_datetime(),
+                end_date=datetime.now()
             )
             
-            if historical_data['1min'] is not None:
-                # Convert to candles
-                candles = []
-                for _, row in historical_data['1min'].iterrows():
-                    candle = Candle(
-                        timestamp=row['timestamp'],
-                        open_price=float(row['open']),
-                        high=float(row['high']),
-                        low=float(row['low']),
-                        close=float(row['close'])
-                    )
-                    candles.append(candle)
+            if historical_data is not None:
+                # Convert to DataFrame for demo server
+                df = historical_data.copy()
                 
-                # Initialize demo server
-            self.demo_server = DemoServer(
-                port=self.config.demo_server_port,
-                stream_interval_seconds=self.config.symbol
-            )
-            
+                # Filter data to only include candles from demo start date onwards
+                demo_start_date = self.config.get_demo_start_datetime()
+                
+                # Convert demo_start_date to timezone-aware (Asia/Kolkata) for comparison
+                if demo_start_date.tzinfo is None:
+                    import pytz
+                    kolkata_tz = pytz.timezone('Asia/Kolkata')
+                    demo_start_date = kolkata_tz.localize(demo_start_date)
+                
+                df = df[df['timestamp'] >= demo_start_date].copy()
+                
+                if len(df) == 0:
+                    self.logger.error(f"No data available from demo start date {demo_start_date}")
+                    return
+                
+                # Find the exact 09:15:00 candle to start from
+                demo_start_time = self.config.get_demo_start_datetime()
+                if demo_start_time.tzinfo is None:
+                    import pytz
+                    kolkata_tz = pytz.timezone('Asia/Kolkata')
+                    demo_start_time = kolkata_tz.localize(demo_start_time)
+                
+                # Debug: Show what candles we actually have
+                self.logger.info(f"Available candles in data:")
+                for i in range(min(5, len(df))):
+                    candle_time = df.iloc[i]['timestamp']
+                    self.logger.info(f"  Candle {i}: {candle_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # Find the first candle that starts at or after 09:15:00
+                start_candle_index = None
+                for i, row in df.iterrows():
+                    if row['timestamp'] >= demo_start_time:
+                        start_candle_index = i
+                        break
+                
+                if start_candle_index is None:
+                    self.logger.error(f"No candle found at or after demo start time {demo_start_time}")
+                    return
+                
+                # Slice the dataframe to start from the correct candle
+                df = df.iloc[start_candle_index:].copy()
+                
+                self.logger.info(f"Demo start time: {demo_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"First candle to stream: {df.iloc[0]['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                
+                # If the first candle is not exactly 09:15:00, we need to create a synthetic 09:15:00 candle
+                first_candle_time = df.iloc[0]['timestamp']
+                if first_candle_time > demo_start_time:
+                    self.logger.warning(f"⚠️  No 09:15:00 candle found! First available candle is {first_candle_time.strftime('%H:%M:%S')}")
+                    self.logger.warning(f"⚠️  Creating synthetic 09:15:00 candle using first available candle data")
+                    
+                    # Create a synthetic 09:15:00 candle using the first available candle's data
+                    first_candle = df.iloc[0]
+                    synthetic_candle = {
+                        'timestamp': demo_start_time,
+                        'open': first_candle['open'],
+                        'high': first_candle['high'], 
+                        'low': first_candle['low'],
+                        'close': first_candle['close'],
+                        'volume': first_candle.get('volume', 0)
+                    }
+                    
+                    # Insert the synthetic candle at the beginning
+                    df = pd.concat([pd.DataFrame([synthetic_candle]), df], ignore_index=True)
+                    self.logger.info(f"✅ Created synthetic 09:15:00 candle: O:{synthetic_candle['open']:.2f} H:{synthetic_candle['high']:.2f} L:{synthetic_candle['low']:.2f} C:{synthetic_candle['close']:.2f}")
+                
+                self.demo_server = DemoServer(
+                    historical_data=df,
+                    start_date=demo_start_time,
+                    port=self.config.demo_server_port,
+                    stream_interval_seconds=self.config.demo_stream_interval_seconds
+                )
+                
+                # Set data callback to process candles through strategy manager
+                self.demo_server.set_data_callback(self._on_demo_data)
+                
                 # Initialize demo client
-            self.demo_client = DemoDataClient(f"http://localhost:{self.config.demo_server_port}")
-            self.logger.info(f"Demo server initialized with {len(candles)} 1-minute candles for {self.config.symbol}")
-            
-            # Show date range
-            if candles:
-                start_date = candles[0].timestamp
-                end_date = candles[-1].timestamp
-                self.logger.info(f"Date range: {start_date.date()} to {end_date.date()}")
-            else:
-                self.logger.error("Warning: Could not fetch historical data for demo trading")
+                self.demo_client = DemoDataClient(f"http://localhost:{self.config.demo_server_port}")
+                self.logger.info(f"Demo server initialized with {len(df)} 1-minute candles for {self.config.symbol}")
                 
+                # Show date range
+                if len(df) > 0:
+                    start_date = df.iloc[0]['timestamp']
+                    end_date = df.iloc[-1]['timestamp']
+                    self.logger.info(f"Demo streaming date range: {start_date.date()} to {end_date.date()}")
+                    # Log the configured demo start time, not the first available candle
+                    self.logger.info(f"Demo start time: {demo_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                else:
+                    self.logger.error("Warning: Could not fetch historical data for demo trading")
+                    
         except Exception as e:
             self.logger.error(f"Error initializing demo server: {e}")
     
@@ -317,11 +340,11 @@ class TradingBot:
         # Initialize WebSocket for market data
         self.websocket = MarketDataWebSocket(
             client_id=self.config.client_id,
-        access_token=self.config.access_token,
-        on_message=self._on_websocket_message,
-        on_error=self._on_websocket_error,
-        on_close=self._on_websocket_close
-    )
+            access_token=self.config.access_token,
+            on_message_callback=self._on_websocket_message,
+            on_error_callback=self._on_websocket_error,
+            on_close_callback=self._on_websocket_close
+        )
         
         # Connect and start streaming
         self.websocket.connect({self.config.symbol: security_id})
@@ -335,19 +358,32 @@ class TradingBot:
         
         # Start demo server
         if self.demo_server:
-            self.demo_server.start()
-            time.sleep(2)  # Give server time to start
-            
-            # Start demo client
-            self.demo_client.start_streaming(
-                callback=self._on_demo_data,
-                interval=self.config.demo_stream_interval_seconds
-            )
-            
+            self.start_demo_server()
+            self.demo_client.set_callback(self._on_demo_data)
+            self.demo_client.start_data_stream()
+            self.demo_client.start_simulation()
             # Keep running
             self._run_demo_loop()
         else:
             raise ValueError("Demo server not initialized")
+
+    def start_demo_server(self):
+        """Start the demo server in a separate thread"""
+        import threading
+        server_thread = threading.Thread(target=self.demo_server.run)
+        server_thread.daemon = True
+        server_thread.start()
+
+        # Wait for server to start
+        time.sleep(3)
+
+        # Connect client to server
+        if self.demo_client.connect():
+            self.logger.info("Demo server started and client connected")
+            return True
+        else:
+            self.logger.error("Failed to connect to demo server")
+            return False
     
     def _run_live_loop(self):
         """Main loop for live trading"""
@@ -382,11 +418,18 @@ class TradingBot:
         self.logger.info("Demo trading loop started")
         
         try:
+            loop_count = 0
             while True:
+                loop_count += 1
+                
                 # Check if demo client is still running
                 if not self.demo_client.is_running():
                     self.logger.info("Demo client stopped")
                     break
+                
+                # Log status every 30 seconds
+                if loop_count % 30 == 0:
+                    self.logger.info(f"Demo trading loop running... (loop {loop_count})")
                 
                 # Sleep for a short interval
                 time.sleep(1)
@@ -398,7 +441,7 @@ class TradingBot:
         finally:
             self.stop()
     
-    def _on_websocket_message(self, message):
+    def _on_websocket_message(self, ws, message):
         """Handle WebSocket market data messages"""
         try:
             # Process ticker data
@@ -407,8 +450,10 @@ class TradingBot:
                 price = ticker_data['last_price']
                 timestamp = ticker_data['timestamp']
                 
-                # Update strategy with new price
-                self.strategy.update_1min_candle(price, timestamp)
+                # Update strategy manager with new price
+                trade_trigger = self.strategy_manager.candle_data.update_1min_candle(price, timestamp)
+                if trade_trigger:
+                    self.logger.info(f"🎯 Trade triggered from live data: {trade_trigger['strategy_name']}")
                     
         except Exception as e:
             self.logger.error(f"Error processing WebSocket message: {e}")
@@ -416,17 +461,26 @@ class TradingBot:
     def _on_demo_data(self, candle_data, timestamp):
         """Handle demo data updates"""
         try:
-            # Update strategy with demo data
-            self.strategy.update_1min_candle_with_data(candle_data, timestamp)
+            # Log demo data reception
+            self.logger.info(f"📡 DEMO DATA RECEIVED")
+            self.logger.info(f"   Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(f"   OHLC: O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
+            
+            # Process candle through strategy manager
+            trade_trigger = self.strategy_manager.candle_data.update_1min_candle_with_data(candle_data, timestamp)
+            if trade_trigger:
+                self.logger.info(f"🎯 Trade triggered from demo data: {trade_trigger['strategy_name']}")
             
         except Exception as e:
-            self.logger.error(f"Error processing demo data: {e}")
+            self.logger.error(f"❌ Error processing demo data: {e}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
     
-    def _on_websocket_error(self, error):
+    def _on_websocket_error(self, ws, error):
         """Handle WebSocket errors"""
         self.logger.error(f"WebSocket error: {error}")
     
-    def _on_websocket_close(self, close_status_code, close_msg):
+    def _on_websocket_close(self, ws, close_status_code, close_msg):
         """Handle WebSocket close"""
         self.logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
     
@@ -436,10 +490,15 @@ class TradingBot:
             entry_price = trigger.get('entry', 0)
             stop_loss = trigger.get('stop_loss', 0)
             target = trigger.get('target', 0)
-            trigger_type = trigger.get('type', 'Unknown')
+            strategy_name = trigger.get('strategy_name', 'Unknown')
             
-            self.logger.info(f"Strategy triggered trade entry: {trigger_type}")
-            self.logger.info(f"Entry: {entry_price:.2f}, Stop: {stop_loss:.2f}, Target: {target:.2f}")
+            self.logger.info(f"💰 TRADE ENTRY TRIGGERED!")
+            self.logger.info(f"   📊 Strategy: {strategy_name}")
+            self.logger.info(f"   📈 Entry: {entry_price:.2f}")
+            self.logger.info(f"   🛑 Stop Loss: {stop_loss:.2f}")
+            self.logger.info(f"   🎯 Target: {target:.2f}")
+            self.logger.info(f"   💰 Risk: {entry_price - stop_loss:.2f}")
+            self.logger.info(f"   💎 Reward: {target - entry_price:.2f}")
             
             # Enter trade using position manager
             success = self.position_manager.enter_trade(
@@ -447,18 +506,16 @@ class TradingBot:
                 entry_price=entry_price,
                 stop_loss=stop_loss,
                 target=target,
-                trigger_type=trigger_type,
+                trigger_type=strategy_name,
                 instruments_df=self.instruments_df
             )
             
             if success:
                 self.logger.info(f"✅ Trade entered successfully for {self.config.symbol}!")
-                # Notify strategy
-                self.strategy.enter_trade(entry_price, stop_loss, target)
             else:
                 self.logger.error(f"❌ Failed to enter trade for {self.config.symbol}")
-                # Reset strategy
-                self.strategy.exit_trade(entry_price, "order_failed")
+                # Reset strategy manager
+                self.strategy_manager.exit_trade(entry_price, "order_failed")
                     
         except Exception as e:
             self.logger.error(f"Error handling trade entry: {e}")
@@ -466,7 +523,9 @@ class TradingBot:
     def _on_strategy_trade_exit(self, exit_price, reason):
         """Handle trade exit from strategy"""
         try:
-            self.logger.info(f"Strategy triggered trade exit: {reason} at {exit_price:.2f}")
+            self.logger.info(f"🚪 TRADE EXIT TRIGGERED!")
+            self.logger.info(f"   💰 Exit Price: {exit_price:.2f}")
+            self.logger.info(f"   📝 Reason: {reason}")
             
             # Close position using position manager
             success = self.position_manager.close_position(self.config.symbol)
@@ -498,13 +557,14 @@ class TradingBot:
         if self.websocket:
             self.websocket.close()
         
-        # Stop demo server
-        if self.demo_server:
-            self.demo_server.stop()
-        
         # Stop demo client
         if self.demo_client:
-            self.demo_client.stop()
+            self.demo_client.stop_data_stream()
+            self.demo_client.stop_simulation()
+        
+        # Stop demo server
+        if self.demo_server:
+            self.demo_server.stop_simulation()
         
         # Close all positions
         self._close_all_positions()
@@ -516,7 +576,7 @@ def main():
     bot = None
     try:
         # Create and start trading bot
-        bot = TradingBot()
+        bot = NewArchitectureTradingBot()
         bot.start()
     except KeyboardInterrupt:
         print("\nReceived keyboard interrupt, shutting down...")

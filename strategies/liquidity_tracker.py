@@ -2,7 +2,7 @@
 Liquidity Tracker for ERL to IRL Trading Strategy
 Manages FVGs, Implied FVGs, and previous highs/lows for liquidity-based trading
 """
-
+from collections import deque
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 from models.candle import Candle
@@ -47,6 +47,8 @@ class LiquidityTracker:
         self.swing_highs = []  # For ERL targets
         self.swing_lows = []  # For ERL targets
         self.swing_look_back = 1
+        # Candle storage - only 5m and 1m
+        self.lt_five_min_candles = deque(maxlen=30000)  # Store 5-minute candles
         
         # Sorted price lists for efficient lookup
         self._bullish_fvg_prices = []
@@ -56,18 +58,18 @@ class LiquidityTracker:
         self._previous_high_prices = []
         self._previous_low_prices = []
     
-    def add_historical_data(self, candles_5min: List[Candle], candles_15min: List[Candle], symbol: str = "Unknown"):
+    def add_historical_data(self, candles_5min: List[Candle], symbol: str = "Unknown"):
         """
         Process historical data to identify and store all liquidity zones with 2-pass mitigation check
         
         Args:
             candles_5min: List of 5-minute candles
-            candles_15min: List of 15-minute candles
             symbol: Trading symbol name for logging
         """
         if self.logger:
-            self.logger.info(f"Processing historical data for {symbol}: {len(candles_5min)} 5min candles, {len(candles_15min)} 15min candles")
-        
+            self.logger.info(f"Processing historical data for {symbol}: {len(candles_5min)} 5min candles")
+        for i in range(len(candles_5min)):
+            self.lt_five_min_candles.append(candles_5min[i])
         # 1st Pass: Process 5-minute candles to detect FVGs/IFVGs
         self._process_candles_for_fvgs(candles_5min, "5min", symbol)
         self._process_candles_for_implied_fvgs(candles_5min, "5min", symbol)
@@ -75,20 +77,9 @@ class LiquidityTracker:
         self._process_candles_for_swing_lows(candles_5min, "5min", symbol)
         self._process_candles_for_swing_highs(candles_5min, "5min", symbol)
         
-        # 1st Pass: Process 15-minute candles to detect FVGs/IFVGs
-        self._process_candles_for_fvgs(candles_15min, "15min", symbol)
-        self._process_candles_for_implied_fvgs(candles_15min, "15min", symbol)
-        self._process_candles_for_previous_highs_lows(candles_15min, "15min", symbol)
-        self._process_candles_for_swing_lows(candles_15min, "15min", symbol)
-        self._process_candles_for_swing_highs(candles_15min, "15min", symbol)
-        
         # 2nd Pass: Check for mitigation in 5m timeframe
         if len(candles_5min) >= 3:
             self._check_historical_mitigation(candles_5min, "5min", symbol)
-        
-        # 2nd Pass: Check for mitigation in 15m timeframe
-        if len(candles_15min) >= 3:
-            self._check_historical_mitigation(candles_15min, "15min", symbol)
         
         # Sort all price lists for efficient lookup
         self._sort_price_lists()
@@ -317,7 +308,7 @@ class LiquidityTracker:
         
         Args:
             price: Current price
-            timeframe: Filter by timeframe ('5min' or '15min') or None for all
+            timeframe: Filter by timeframe ('5min') or None for all
         
         Returns:
             Nearest bearish liquidity zone above price
@@ -349,7 +340,7 @@ class LiquidityTracker:
         
         Args:
             price: Current price
-            timeframe: Filter by timeframe ('5min' or '15min') or None for all
+            timeframe: Filter by timeframe ('5min') or None for all
         
         Returns:
             Nearest bullish liquidity zone below price
@@ -381,7 +372,7 @@ class LiquidityTracker:
         
         Args:
             candles: List of candles in the timeframe
-            timeframe: Timeframe string (5min or 15min)
+            timeframe: Timeframe string (5min)
             symbol: Symbol name for logging
         """
         if not candles or len(candles) < 3:
@@ -395,12 +386,12 @@ class LiquidityTracker:
         
         if self.logger:
             self.logger.debug(f"Checking historical mitigation for {symbol} {timeframe}: {len(timeframe_bullish_fvgs)} Bullish I/FVGs, {len(timeframe_bearish_fvgs)} BearishI/FVGs")
-        
+
         # Check each candle against all FVGs/IFVGs that were created before it
         for candle in candles:
             for zone in timeframe_bullish_fvgs:
                 # Only check zones that were created before this candle
-                if not zone.mitigated and zone.timestamp < candle.timestamp:
+                if not zone.mitigated and zone.timestamp < candle.timestamp - timedelta(minutes=10):
                     # Check if candle touches the midpoint (mitigation condition)
                     if candle.low <= zone.midpoint <= candle.high:
                         zone.mitigated = True
@@ -411,7 +402,7 @@ class LiquidityTracker:
                             self.logger.debug(f"Historical {zone.zone_type} mitigated at {candle.timestamp.strftime('%H:%M:%S')} - Price: {zone.midpoint:.2f}")
             for zone in timeframe_bearish_fvgs:
                 # Only check zones that were created before this candle
-                if not zone.mitigated and zone.timestamp < candle.timestamp:
+                if not zone.mitigated and zone.timestamp < candle.timestamp - timedelta(minutes=10):
                     # Check if candle touches the midpoint (mitigation condition)
                     if candle.high >= zone.midpoint >= candle.low:
                         zone.mitigated = True
@@ -436,7 +427,7 @@ class LiquidityTracker:
         
         # Check bullish FVGs/IFVGs (mitigated if current candle touches their midpoint)
         for zone in self.bullish_fvgs + self.bullish_ifvgs:
-            if not zone.mitigated and zone.timestamp < current_candle.timestamp:
+            if not zone.mitigated and zone.timestamp < current_candle.timestamp - timedelta(minutes=10):
                 if current_candle.low <= zone.midpoint <= current_candle.high:
                     zone.mitigated = True
                     zone.mitigation_timestamp = current_candle.timestamp
@@ -447,7 +438,7 @@ class LiquidityTracker:
         
         # Check bearish FVGs/IFVGs (mitigated if current candle touches their midpoint)
         for zone in self.bearish_fvgs + self.bearish_ifvgs:
-            if not zone.mitigated and zone.timestamp < current_candle.timestamp:
+            if not zone.mitigated and zone.timestamp < current_candle.timestamp - timedelta(minutes=10):
                 if current_candle.high >= zone.midpoint >= current_candle.low:
                     zone.mitigated = True
                     zone.mitigation_timestamp = current_candle.timestamp
@@ -505,11 +496,309 @@ class LiquidityTracker:
         """Get all swing highs as a list of prices"""
         return self.previous_highs.copy()
     
-    def process_candle(self, candle: Candle, timeframe: str):
-        """Process a single candle to detect new FVGs/IFVGs"""
+    def process_candle(self, candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single candle to detect new FVGs/IFVGs/SwingHighs/SwingLows
+        Uses the new candle combined with existing candle history for pattern detection
+        
+        Args:
+            candle: The completed candle to process
+            timeframe: Timeframe string ('5min')
+            symbol: Trading symbol name for logging
+        """
         if timeframe == '5min':
-            self._process_candles_for_fvgs([candle], timeframe, "Unknown")
-            self._process_candles_for_implied_fvgs([candle], timeframe, "Unknown")
-        elif timeframe == '15min':
-            self._process_candles_for_fvgs([candle], timeframe, "Unknown")
-            self._process_candles_for_implied_fvgs([candle], timeframe, "Unknown")
+            if candle not in self.lt_five_min_candles:
+                self.lt_five_min_candles.append(candle)
+            # Process for FVGs using new candle + last 2 candles from history
+            self._process_single_candle_for_fvgs(candle, timeframe, symbol)
+            
+            # Process for Implied FVGs using new candle + history
+            self._process_single_candle_for_implied_fvgs(candle, timeframe, symbol)
+            
+            # Process for previous highs/lows (always add new candle's high/low)
+            self._process_single_candle_for_previous_highs_lows(candle, timeframe, symbol)
+            
+            # Process for swing highs/lows using new candle + lookback from history
+            self._process_single_candle_for_swing_highs(candle, timeframe, symbol)
+            self._process_single_candle_for_swing_lows(candle, timeframe, symbol)
+            
+            # Sort price lists after adding new zones
+            self._sort_price_lists()
+            
+            if self.logger:
+                self.logger.info(f"🕯️ PROCESSED 5-MINUTE CANDLE")
+                self.logger.info(f"   Time: {candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"   OHLC: O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+                self.logger.info(f"   Symbol: {symbol}")
+                
+                # Log summary of what was detected
+                summary = self.get_liquidity_summary()
+                self.logger.info(f"   📊 Liquidity Summary: {summary['total_zones']} active zones")
+                if summary['bullish_fvgs'] > 0 or summary['bearish_fvgs'] > 0:
+                    self.logger.info(f"      FVGs: {summary['bullish_fvgs']} Bullish, {summary['bearish_fvgs']} Bearish")
+                if summary['bullish_ifvgs'] > 0 or summary['bearish_ifvgs'] > 0:
+                    self.logger.info(f"      IFVGs: {summary['bullish_ifvgs']} Bullish, {summary['bearish_ifvgs']} Bearish")
+                self.logger.info(f"      Previous Highs: {summary['previous_highs']}, Previous Lows: {summary['previous_lows']}")
+                self.logger.info(f"   ✅ 5-minute candle processing completed")
+        # Only 5min timeframe is supported now
+    
+    def _process_single_candle_for_fvgs(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single new candle for FVG detection using the last 2 candles from history
+        
+        Args:
+            new_candle: The new completed candle
+            timeframe: Timeframe string
+            symbol: Symbol name for logging
+        """
+        # Get the last 2 candles from history for FVG pattern detection
+        # We need candles in order: [oldest, middle, newest] where newest is the new_candle
+        
+        # For FVG detection, we need to check if the new candle (C) forms a gap with candle A
+        # But we need to get the last 2 candles from our stored history
+        
+        # Get recent candles from our stored zones (they contain the candle references)
+        recent_candles = []
+
+        recent_candles = list(self.lt_five_min_candles)[-3:]  # Get last 3 from deque
+
+        if len(recent_candles) >= 3:
+            candle_a = recent_candles[-3]  # Third to last
+            candle_b = recent_candles[-2]  # second Last
+            candle_c = new_candle          # New candle
+            
+            # Check for bullish FVG (C.low > A.high)
+            if candle_c.low > candle_a.high:
+                gap_size = candle_c.low - candle_a.high
+                midpoint = candle_a.high + (gap_size / 2)
+                
+                zone = LiquidityZone(
+                    zone_type=f"bullish_fvg_{timeframe}",
+                    price_high=candle_c.low,
+                    price_low=candle_a.high,
+                    timestamp=candle_a.timestamp,
+                    candle=candle_a,
+                    midpoint=midpoint,
+                    symbol=symbol
+                )
+                self.bullish_fvgs.append(zone)
+                
+                if self.logger:
+                    self.logger.info(f"🟢 BULLISH FVG DETECTED!")
+                    self.logger.info(f"   Time: {candle_a.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"   Lower: {candle_a.high:.2f}, Upper: {candle_c.low:.2f}")
+                    self.logger.info(f"   Gap Size: {gap_size:.2f}, Midpoint: {midpoint:.2f}")
+                    self.logger.info(f"   Symbol: {symbol}")
+            
+            # Check for bearish FVG (A.high > C.low)
+            elif candle_c.high < candle_a.low:
+                gap_size = candle_a.low - candle_c.high
+                midpoint = candle_a.low - (gap_size / 2)
+                
+                zone = LiquidityZone(
+                    zone_type=f"bearish_fvg_{timeframe}",
+                    price_high=candle_a.low,
+                    price_low=candle_c.high,
+                    timestamp=candle_a.timestamp,
+                    candle=candle_a,
+                    midpoint=midpoint,
+                    symbol=symbol
+                )
+                self.bearish_fvgs.append(zone)
+                
+                if self.logger:
+                    self.logger.info(f"🔴 BEARISH FVG DETECTED!")
+                    self.logger.info(f"   Time: {candle_a.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"   Upper: {candle_a.low:.2f}, Lower: {candle_c.high:.2f}")
+                    self.logger.info(f"   Gap Size: {gap_size:.2f}, Midpoint: {midpoint:.2f}")
+                    self.logger.info(f"   Symbol: {symbol}")
+    
+    def _process_single_candle_for_implied_fvgs(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single new candle for Implied FVG detection
+        
+        Args:
+            new_candle: The new completed candle
+            timeframe: Timeframe string
+            symbol: Symbol name for logging
+        """
+        # For IFVG detection, we need to use the ImpliedFVGDetector
+        # We need to provide it with a list of candles including the new one
+        
+        # Get recent candles from history (similar to FVG processing)
+        recent_candles = []
+
+        recent_candles = list(self.lt_five_min_candles)[-3:]  # Get last 3 from deque
+        
+        # Remove duplicates and sort by timestamp
+        recent_candles = list(set(recent_candles))
+        recent_candles.sort(key=lambda x: x.timestamp)
+        
+        # Add the new candle
+        #recent_candles.append(new_candle)
+        
+        # Use the existing IFVG detector if we have enough candles
+        if len(recent_candles) >= 3:
+            ifvgs = self.ifvg_detector.scan_candles_for_implied_fvgs(recent_candles, symbol)
+            
+            # Only process IFVGs that involve the new candle (to avoid duplicates)
+            for ifvg in ifvgs['bullish']:
+                if ifvg['candle'] == new_candle or ifvg['timestamp'] == new_candle.timestamp:
+                    zone = LiquidityZone(
+                        zone_type=f"bullish_ifvg_{timeframe}",
+                        price_high=ifvg['price_high'],
+                        price_low=ifvg['price_low'],
+                        timestamp=ifvg['timestamp'],
+                        candle=ifvg['candle'],
+                        midpoint=ifvg['midpoint'],
+                        symbol=symbol
+                    )
+                    self.bullish_ifvgs.append(zone)
+                    
+                    if self.logger:
+                        self.logger.info(f"🟢 BULLISH IFVG DETECTED!")
+                        self.logger.info(f"   Time: {ifvg['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        self.logger.info(f"   Upper: {ifvg['price_high']:.2f}, Lower: {ifvg['price_low']:.2f}")
+                        self.logger.info(f"   Midpoint: {ifvg['midpoint']:.2f}")
+                        self.logger.info(f"   Symbol: {symbol}")
+            
+            for ifvg in ifvgs['bearish']:
+                if ifvg['candle'] == new_candle or ifvg['timestamp'] == new_candle.timestamp:
+                    zone = LiquidityZone(
+                        zone_type=f"bearish_ifvg_{timeframe}",
+                        price_high=ifvg['price_high'],
+                        price_low=ifvg['price_low'],
+                        timestamp=ifvg['timestamp'],
+                        candle=ifvg['candle'],
+                        midpoint=ifvg['midpoint'],
+                        symbol=symbol
+                    )
+                    self.bearish_ifvgs.append(zone)
+                    
+                    if self.logger:
+                        self.logger.info(f"🔴 BEARISH IFVG DETECTED!")
+                        self.logger.info(f"   Time: {ifvg['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
+                        self.logger.info(f"   Upper: {ifvg['price_high']:.2f}, Lower: {ifvg['price_low']:.2f}")
+                        self.logger.info(f"   Midpoint: {ifvg['midpoint']:.2f}")
+                        self.logger.info(f"   Symbol: {symbol}")
+    
+    def _process_single_candle_for_previous_highs_lows(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single new candle for previous highs/lows (always add new candle's high/low)
+        
+        Args:
+            new_candle: The new completed candle
+            timeframe: Timeframe string
+            symbol: Symbol name for logging
+        """
+        # Always add the new candle's high and low as previous high/low zones
+        
+        # Store previous high (for bearish ERL targets)
+        zone = LiquidityZone(
+            zone_type=f"previous_high_{timeframe}",
+            price_high=new_candle.high,
+            price_low=new_candle.high - 0.05,  # Small buffer below high
+            timestamp=new_candle.timestamp,
+            candle=new_candle,
+            midpoint=new_candle.high,
+            symbol=symbol
+        )
+        self.previous_highs.append(zone)
+        
+        # Store previous low (for bullish ERL targets)
+        zone = LiquidityZone(
+            zone_type=f"previous_low_{timeframe}",
+            price_high=new_candle.low + 0.05,  # Small buffer above low
+            price_low=new_candle.low,
+            timestamp=new_candle.timestamp,
+            candle=new_candle,
+            midpoint=new_candle.low,
+            symbol=symbol
+        )
+        self.previous_lows.append(zone)
+    
+    def _process_single_candle_for_swing_highs(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single new candle for swing high detection using lookback from history
+        
+        Args:
+            new_candle: The new completed candle
+            timeframe: Timeframe string
+            symbol: Symbol name for logging
+        """
+        # Get recent candles from history for swing detection
+        recent_candles = []
+
+        recent_candles = list(self.lt_five_min_candles)[-5:]  # Get last 3 from deque
+        
+        # Remove duplicates and sort by timestamp
+        recent_candles = list(set(recent_candles))
+        recent_candles.sort(key=lambda x: x.timestamp)
+        
+        # Add the new candle
+        #recent_candles.append(new_candle)
+        
+        # Check if the new candle is a swing high
+        if len(recent_candles) >= (2 * self.swing_look_back + 1):
+            new_candle_index = len(recent_candles) - 1  # New candle is the last one
+            
+            if self._check_swing_high(recent_candles, new_candle_index):
+                zone = LiquidityZone(
+                    zone_type=f"swing_high_{timeframe}",
+                    price_high=new_candle.high,
+                    price_low=new_candle.high,
+                    timestamp=new_candle.timestamp,
+                    candle=new_candle,
+                    midpoint=new_candle.high,
+                    symbol=symbol
+                )
+                self.swing_highs.append(zone)
+                
+                if self.logger:
+                    self.logger.info(f"📈 SWING HIGH DETECTED!")
+                    self.logger.info(f"   Time: {new_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"   High: {new_candle.high:.2f}")
+                    self.logger.info(f"   Symbol: {symbol}")
+    
+    def _process_single_candle_for_swing_lows(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
+        """
+        Process a single new candle for swing low detection using lookback from history
+        
+        Args:
+            new_candle: The new completed candle
+            timeframe: Timeframe string
+            symbol: Symbol name for logging
+        """
+        # Get recent candles from history for swing detection
+        recent_candles = []
+
+        recent_candles = list(self.lt_five_min_candles)[-5:]  # Get last 5 from deque
+        
+        # Remove duplicates and sort by timestamp
+        recent_candles = list(set(recent_candles))
+        recent_candles.sort(key=lambda x: x.timestamp)
+        
+        # Add the new candle
+        #recent_candles.append(new_candle)
+        
+        # Check if the new candle is a swing low
+        if len(recent_candles) >= (2 * self.swing_look_back + 1):
+            new_candle_index = len(recent_candles) - 1  # New candle is the last one
+            
+            if self._check_swing_low(recent_candles, new_candle_index):
+                zone = LiquidityZone(
+                    zone_type=f"swing_low_{timeframe}",
+                    price_high=new_candle.low,
+                    price_low=new_candle.low,
+                    timestamp=new_candle.timestamp,
+                    candle=new_candle,
+                    midpoint=new_candle.low,
+                    symbol=symbol
+                )
+                self.swing_lows.append(zone)
+                
+                if self.logger:
+                    self.logger.info(f"📉 SWING LOW DETECTED!")
+                    self.logger.info(f"   Time: {new_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"   Low: {new_candle.low:.2f}")
+                    self.logger.info(f"   Symbol: {symbol}")

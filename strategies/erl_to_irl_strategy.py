@@ -40,57 +40,48 @@ class ERLToIRLStrategy(CandleStrategy):
     
     def initialize_with_historical_data(self, symbol: str, historical_data: Dict[str, List[Candle]]):
         """
-        Initialize the strategy with  days of historical data
+        Initialize the strategy with historical data
         
         Args:
             symbol: Trading symbol
-            historical_data: Dictionary with '5min' and '15min' candle lists
+            historical_data: Dictionary with '5min' and '1min' candle lists
         """
         if self.logger:
             self.logger.info(f"Initializing ERL to IRL strategy for {symbol}")
         
         # Convert Candle objects to lists for liquidity tracker
         candles_5min = historical_data.get('5min', [])
-        candles_15min = historical_data.get('15min', [])
+        candles_1min = historical_data.get('1min', [])
         
-        if not candles_5min or not candles_15min:
+        if not candles_5min or not candles_1min:
             if self.logger:
                 self.logger.error("Missing historical data for strategy initialization")
             return False
         
         # Process historical data to identify liquidity zones
-        self.liquidity_tracker.add_historical_data(candles_5min, candles_15min, symbol)
+        self.liquidity_tracker.add_historical_data(candles_5min, symbol)
         
-        # Set initial sweep targets from the most recent 5m and 15m lows
-        self._set_initial_sweep_targets(candles_5min, candles_15min)
+        # Set initial sweep targets from the most recent 5m lows
+        self._set_initial_sweep_targets(candles_5min)
         
         self.initialized = True
         
         if self.logger:
             summary = self.liquidity_tracker.get_liquidity_summary()
             self.logger.info(f"Strategy initialized with {summary['total_zones']} active liquidity zones")
-            self.logger.info(f"✅ ERL to IRL strategy initialized for {self.symbol}")
+            #self.logger.info(f"✅ ERL to IRL strategy initialized for {self.symbol}")
         
         return True
     
-    def _set_initial_sweep_targets(self, candles_5min: List[Candle], candles_15min: List[Candle]):
+    def _set_initial_sweep_targets(self, candles_5min: List[Candle]):
         """Set initial sweep targets from recent lows"""
         if candles_5min:
             # Set 5m low as target for 1m sweeps
-            #recent_5m_low = min(candle.low for candle in candles_5min[-10:])  # Last 10 candles
             recent_5m_low = candles_5min[-1].low
-
+            self.sweep_low_5m = recent_5m_low
             
             if self.logger:
                 self.logger.info(f"Set initial 5m sweep target: {recent_5m_low:.2f}")
-        
-        if candles_15min:
-            # Set 15m low as target for 1m sweeps
-            recent_15m_low = candles_15min[-1].low
-
-            
-            if self.logger:
-                self.logger.info(f"Set initial 15m sweep target: {recent_15m_low:.2f}")
     
     def update_price(self, price: float, symbol: str = None):
         """Update strategy with current price (for live trading)"""
@@ -103,13 +94,12 @@ class ERLToIRLStrategy(CandleStrategy):
         current_candle = Candle(current_time, price, price, price, price)
         self.update_1m_candle(current_candle)
     
-    def update_1m_candle(self, candle_1m: Candle, candle_15m: Candle = None):
+    def update_1m_candle(self, candle_1m: Candle):
         """
         Update strategy with new 1-minute candle
         
         Args:
             candle_1m: The 1-minute candle
-            candle_15m: The current 15-minute candle (if available)
         """
         if not self.initialized:
             return
@@ -140,21 +130,7 @@ class ERLToIRLStrategy(CandleStrategy):
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_5m)
     
-    def update_15m_candle(self, candle_15m: Candle):
-        """
-        Update strategy with new 15-minute candle
-        
-        Args:
-            candle_15m: The 15-minute candle
-        """
-        if not self.initialized:
-            return
-        
-        # Call parent class method to handle 15m candle updates and set sweep targets
-        self.update_15min_candle(candle_15m.close, candle_15m.timestamp)
-        
-        # Check for FVG/IFVG mitigation
-        self.liquidity_tracker.check_and_mark_mitigation(candle_15m)
+    # 15m candle updates removed - only 5m and 1m timeframes supported
 
     def get_strategy_status(self) -> Dict:
         """Get current strategy status"""

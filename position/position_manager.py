@@ -350,8 +350,24 @@ class PositionManager:
                 print(f"No quantity to close for symbol: {symbol}")
                 return False
             
+            # Debug: Print position structure
+            print(f"DEBUG: Position structure for {symbol}: {position}")
+            
             # Determine side (BUY to close SELL position, SELL to close BUY position)
-            side = "SELL" if position['side'] == "BUY" else "BUY"
+            position_side = position.get('side', 'LONG')
+            
+            # Handle different position side formats
+            if position_side in ['BUY', 'LONG']:
+                side = "SELL"
+            elif position_side in ['SELL', 'SHORT']:
+                side = "BUY"
+            else:
+                # If we can't determine the side, try to infer from quantity
+                if quantity > 0:
+                    side = "SELL"  # Close long position
+                else:
+                    side = "BUY"   # Close short position
+                print(f"⚠️ Unknown position side '{position_side}', inferred side: {side}")
             
             print(f"Closing position: {symbol} - {quantity} qty @ {side}")
             

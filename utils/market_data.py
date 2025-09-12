@@ -165,19 +165,19 @@ def process_ticker_data(data, security_id=None, callback=None):
     try:
         if len(data) < 16:
             print(f"Invalid ticker packet length: {len(data)}")
-            return
+            return None
             
         # Parse message header to extract security_id if not provided
         header = parse_websocket_message_header(data)
         if not header:
-            return
+            return None
             
         # Use provided security_id or extract from message
         actual_security_id = security_id if security_id is not None else header['security_id']
         
         # Check message type - only process ticker data (\x02)
         if header['feed_code'] != 0x02:
-            return
+            return None
             
         # Extract LTP and LTT from payload (after 8-byte header)
         payload = data[8:]
@@ -198,10 +198,19 @@ def process_ticker_data(data, security_id=None, callback=None):
             # Call the callback function with processed data
             if callback:
                 callback(ltp, timestamp, actual_security_id)
+            
+            # Return the processed data
+            return {
+                'last_price': ltp,
+                'timestamp': timestamp,
+                'security_id': actual_security_id
+            }
         else:
             print(f"Invalid ticker payload length: {len(payload)}")
+            return None
     except Exception as e:
         print(f"Error processing ticker data: {e}")
+        return None
 
 def process_quote_data(data, security_id=None):
     """Process quote data packet for multiple tickers"""

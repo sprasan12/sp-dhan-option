@@ -1,6 +1,0 @@
-@echo off
-echo Activating virtual environment...
-call venv\Scripts\activate.bat
-
-echo Running dual-mode trading bot...
-python trading_bot_dual_mode.py 

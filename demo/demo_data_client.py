@@ -123,9 +123,17 @@ class DemoDataClient:
                         if self.callback:
                             # Pass security_id as None for demo mode (not needed for demo)
                             # Pass the complete candle data instead of just the close price
-                            self.callback(candle_data, self.current_timestamp, None)
+                            self.callback(candle_data, self.current_timestamp)
                         
                         print(f"Demo Data: {self.current_timestamp.strftime('%H:%M:%S')} - Price: {self.current_price}")
+                    else:
+                        # No more data available, stop the stream
+                        print("No more demo data available, stopping stream")
+                        self.running = False
+                        break
+                else:
+                    print(f"Failed to get candle data: {response.status_code}")
+                    time.sleep(5)  # Wait before retrying
                 
                 # Wait for next update (use a shorter interval to match demo server speed)
                 time.sleep(1)  # Check every second instead of every minute
@@ -164,3 +172,7 @@ class DemoDataClient:
         except Exception as e:
             print(f"Error getting streamed candles: {e}")
             return []
+    
+    def is_running(self) -> bool:
+        """Check if the demo client is running"""
+        return self.running

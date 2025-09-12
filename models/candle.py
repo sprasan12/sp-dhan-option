@@ -40,6 +40,12 @@ class Candle:
     def is_neutral_candle(self):
         """Check if this is a neutral candle (body < 50% of total size)"""
         return self.body_percentage() < 50
+    
+    def update_price(self, price):
+        """Update candle with new price (for live updates)"""
+        self.high = max(self.high, price)
+        self.low = min(self.low, price)
+        self.close = price
         
     def __str__(self):
         return f"Candle[{self.timestamp}] O:{self.open:.2f} H:{self.high:.2f} L:{self.low:.2f} C:{self.close:.2f}"

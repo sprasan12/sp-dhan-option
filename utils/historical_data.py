@@ -282,8 +282,8 @@ class HistoricalDataFetcher:
     def fetch_historical_data_v2(self, symbol: str, instruments_df: pd.DataFrame,
                                        reference_date: datetime = None, hist_days: float = 1.0) -> Dict[str, Optional[pd.DataFrame]]:
         """
-        Fetch 10 days of historical data for both 5min and 15min timeframes
-        This is used for ERL to IRL strategy initialization
+        Fetch historical data for both 5min and 1min timeframes
+        This is used for strategy initialization with clean 5m+1m architecture
         
         Args:
             symbol: Trading symbol
@@ -292,7 +292,7 @@ class HistoricalDataFetcher:
             hist_days: Number of calendar days to look back (default: 1.0)
         
         Returns:
-            Dictionary with '5min' and '15min' DataFrames
+            Dictionary with '5min' and '1min' DataFrames
         """
         from datetime import datetime, timedelta
         
@@ -314,13 +314,13 @@ class HistoricalDataFetcher:
         print("Waiting to respect API rate limits...")
         add_delay_between_requests(delay_seconds=0.5)  # 500ms delay
         
-        # Fetch 15-minute candles
-        print("Fetching 15-minute candles...")
-        candles_15min = self.fetch_15min_candles(symbol, instruments_df, start_date=start_date, end_date=end_date)
+        # Fetch 1-minute candles
+        print("Fetching 1-minute candles...")
+        candles_1min = self.fetch_1min_candles(symbol, instruments_df, start_date, end_date)
         
         result = {
             '5min': candles_5min,
-            '15min': candles_15min
+            '1min': candles_1min
         }
         
         # Print summary
@@ -330,10 +330,10 @@ class HistoricalDataFetcher:
         else:
             print("❌ Failed to fetch 5-minute candles")
         
-        if candles_15min is not None:
-            print(f"✅ 15-minute candles: {len(candles_15min)} candles")
-            print(f"   Date range: {candles_15min['timestamp'].min()} to {candles_15min['timestamp'].max()}")
+        if candles_1min is not None:
+            print(f"✅ 1-minute candles: {len(candles_1min)} candles")
+            print(f"   Date range: {candles_1min['timestamp'].min()} to {candles_1min['timestamp'].max()}")
         else:
-            print("❌ Failed to fetch 15-minute candles")
+            print("❌ Failed to fetch 1-minute candles")
         
         return result

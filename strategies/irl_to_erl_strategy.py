@@ -33,10 +33,9 @@ class IRLToERLStrategy(CandleStrategy):
         # Initialize liquidity tracker for FVG/IFVG management
         self.liquidity_tracker = LiquidityTracker(logger)
         
-        # IRL to ERL specific state
+        # Initialize sting detection state
         self.sting_detected = False
-        self.stung_fvg = None  # The FVG/IFVG that was stung
-        self.sting_target_upper = None  # Upper price of the stung FVG/IFVG
+        self.stung_fvg = None
         
         if self.logger:
             self.logger.info(f"IRL to ERL Strategy initialized for {symbol}")
@@ -52,35 +51,61 @@ class IRLToERLStrategy(CandleStrategy):
             self.logger.info(f"Initializing IRL to ERL strategy for {symbol}")
         # Convert Candle objects to lists for liquidity tracker
         candles_5min = historical_data.get('5min', [])
-        candles_15min = historical_data.get('15min', [])
+        candles_1min = historical_data.get('1min', [])
 
-        if not candles_5min or not candles_15min:
+        if not candles_5min or not candles_1min:
             if self.logger:
                 self.logger.error("Missing historical data for strategy initialization")
             return False
 
         # Process historical data to identify liquidity zones
-        self.liquidity_tracker.add_historical_data(candles_5min, candles_15min, symbol)
+        self.liquidity_tracker.add_historical_data(candles_5min, symbol)
 
-        # Set initial sweep targets from the most recent 5m and 15m lows
-        self._set_initial_sting_targets(candles_5min, candles_15min)
+        # Set initial sweep targets from the most recent 5m lows
+        self._set_initial_sting_targets(candles_5min)
 
         self.initialized = True
 
         if self.logger:
             summary = self.liquidity_tracker.get_liquidity_summary()
             self.logger.info(f"Strategy initialized with {summary['total_zones']} active liquidity zones")
-            self.logger.info(f"✅ IRL to ERL strategy initialized for {self.symbol}")
+            #self.logger.info(f"✅ IRL to ERL strategy initialized for {self.symbol}")
 
         return True
 
-    def update_1m_candle(self, candle_1m: Candle, candle_15m: Candle = None):
+    def _set_initial_sting_targets(self, candles_5min: List[Candle]):
+        """Set initial sweep targets from recent lows"""
+        if candles_5min:
+            # Set 5m low as target for 1m sweeps
+            recent_5m_low = candles_5min[-1].low
+            self.sweep_low_5m = recent_5m_low
+
+            if self.logger:
+                self.logger.info(f"Set initial 5m sweep target: {recent_5m_low:.2f}")
+
+    def update_price(self, price: float, timestamp):
+        """Update strategy with current price (for live mode)"""
+        if not self.initialized:
+            return
+
+        # Create a simple candle from the price (live mode limitation)
+        current_candle = Candle(
+            timestamp=timestamp,
+            open_price=price,
+            high=price,
+            low=price,
+            close=price
+        )
+
+        # Update with the candle
+        self.update_1m_candle(current_candle)
+
+    def update_1m_candle(self, candle_1m: Candle):
         """
         Update strategy with new 1-minute candle
         
         Args:
             candle_1m: The 1-minute candle
-            candle_15m: The current 15-minute candle (if available)
         """
         if not self.initialized:
             if self.logger:
@@ -94,6 +119,11 @@ class IRLToERLStrategy(CandleStrategy):
         # IRLtoERL strategy should NOT call parent's sweep detection logic
         # We only need to store the candle for our own sting detection
         self.current_1min_candle = candle_1m
+
+        candle_data = {"open": candle_1m.open, "high": candle_1m.high,
+                       "low": candle_1m.low, "close": candle_1m.close}
+
+        # Call parent class method to handle candle updates and trade logic
         
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_1m)
@@ -112,7 +142,10 @@ class IRLToERLStrategy(CandleStrategy):
             if bullish_ifvgs:
                 for i, ifvg in enumerate(bullish_ifvgs):
                     self.logger.debug(f"IRLtoERL: Active IFVG {i+1}: {ifvg['lower']:.2f} - {ifvg['upper']:.2f} ({ifvg['timeframe']})")
-        
+
+
+        self.update_1min_candle_with_data(candle_data, candle_1m.timestamp)
+
         # Check for sting detection on every 1m candle
         self._check_sting_detection(candle_1m)
         
@@ -148,34 +181,8 @@ class IRLToERLStrategy(CandleStrategy):
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_5m)
     
-    def update_15m_candle(self, candle_15m: Candle):
-        """
-        Update strategy with new 15-minute candle
-        
-        Args:
-            candle_15m: The 15-minute candle
-        """
-        if not self.initialized:
-            return
-        
-        # Store the candle for FVG detection (need at least 3 candles)
-        if not hasattr(self, 'fifteen_min_candles'):
-            self.fifteen_min_candles = []
-        self.fifteen_min_candles.append(candle_15m)
-        
-        # Keep only last 50 candles for memory efficiency
-        if len(self.fifteen_min_candles) > 50:
-            self.fifteen_min_candles = self.fifteen_min_candles[-50:]
-        
-        # Process FVGs/IFVGs if we have enough candles
-        if len(self.fifteen_min_candles) >= 3:
-            self.liquidity_tracker._process_candles_for_fvgs(self.fifteen_min_candles, '15min', self.symbol)
-            self.liquidity_tracker._process_candles_for_implied_fvgs(self.fifteen_min_candles, '15min', self.symbol)
-            self.liquidity_tracker._process_candles_for_previous_highs_lows(self.fifteen_min_candles, '15min', self.symbol)
-        
-        # Check for FVG/IFVG mitigation
-        self.liquidity_tracker.check_and_mark_mitigation(candle_15m)
-    
+    # 15m candle updates removed - only 5m and 1m timeframes supported
+
     def _check_sting_detection(self, candle_1m: Candle):
         """
         Check if 1m candle stings into any bullish FVG/IFVG
@@ -184,21 +191,21 @@ class IRLToERLStrategy(CandleStrategy):
         # Get all active bullish FVGs and IFVGs for this symbol only
         bullish_fvgs = self.liquidity_tracker.get_bullish_fvgs(symbol=self.symbol)
         bullish_ifvgs = self.liquidity_tracker.get_bullish_ifvgs(symbol=self.symbol)
-        
+
         # Debug logging
         if self.logger:
             self.logger.info(f"🔍 IRLtoERL: Checking sting detection for {self.symbol}")
             self.logger.info(f"   Found {len(bullish_fvgs)} bullish FVGs, {len(bullish_ifvgs)} bullish IFVGs")
             self.logger.info(f"   1m candle low: {candle_1m.low:.2f}")
-            
+
             # Log FVG details
             for i, fvg in enumerate(bullish_fvgs):
                 self.logger.info(f"   FVG {i+1}: {fvg['lower']:.2f} - {fvg['upper']:.2f} ({fvg['timeframe']})")
-            
+
             # Log IFVG details
             for i, ifvg in enumerate(bullish_ifvgs):
                 self.logger.info(f"   IFVG {i+1}: {ifvg['lower']:.2f} - {ifvg['upper']:.2f} ({ifvg['timeframe']})")
-        
+
         # Check against bullish FVGs - candle stings INTO the FVG
         for fvg in bullish_fvgs:
             # Sting condition: candle low is within the FVG range (stings into the FVG)
@@ -208,7 +215,7 @@ class IRLToERLStrategy(CandleStrategy):
                     self.sting_detected = True
                     self.stung_fvg = fvg
                     self.sting_target_upper = fvg['upper']
-                    
+
                     if self.logger:
                         self.logger.info(f"🎯 STING DETECTED!")
                         self.logger.info(f"   Symbol: {self.symbol}")
@@ -228,7 +235,7 @@ class IRLToERLStrategy(CandleStrategy):
                         print(f"   FVG Timeframe: {fvg['timeframe']}")
                         print(f"   🔍 Looking for CISD/IMPS...")
                     return
-        
+
         # Check against bullish IFVGs - candle stings INTO the IFVG
         for ifvg in bullish_ifvgs:
             # Sting condition: candle low is within the IFVG range (stings into the IFVG)
@@ -238,7 +245,7 @@ class IRLToERLStrategy(CandleStrategy):
                     self.sting_detected = True
                     self.stung_fvg = ifvg
                     self.sting_target_upper = ifvg['upper']
-                    
+
                     if self.logger:
                         self.logger.info(f"🎯 STING DETECTED!")
                         self.logger.info(f"   Symbol: {self.symbol}")
@@ -258,7 +265,7 @@ class IRLToERLStrategy(CandleStrategy):
                         print(f"   IFVG Timeframe: {ifvg['timeframe']}")
                         print(f"   🔍 Looking for CISD/IMPS...")
                     return
-    
+
     def _check_cisd_imps_triggers(self, candle_1m: Candle):
         """
         Check for CISD/IMPS triggers after sting detection
@@ -267,7 +274,7 @@ class IRLToERLStrategy(CandleStrategy):
             self.logger.info(f"🔍 Checking for CISD/IMPS - Close: {candle_1m.close:.2f} >= Sting Target: {self.sting_target_upper:.2f}")
         else:
             print(f"🔍 Checking for CISD/IMPS - Close: {candle_1m.close:.2f} >= Sting Target: {self.sting_target_upper:.2f}")
-        
+
         # Check if close is above the sting target (recovery condition)
         if candle_1m.close >= self.sting_target_upper:
             # Look for IMPS (1-minute bullish FVG) - IRLtoERL specific
@@ -287,7 +294,7 @@ class IRLToERLStrategy(CandleStrategy):
                     print(f"   Entry: {imps_fvg['entry']:.2f}")
                     print(f"   Stop Loss: {imps_fvg['stop_loss']:.2f}")
                     print(f"   Target: {imps_fvg['target']:.2f}")
-                
+
                 # Override stop loss with FVG low
                 imps_fvg['stop_loss'] = self.stung_fvg['lower']
                 # Calculate target (1:2 RR or nearest swing high)
@@ -295,12 +302,13 @@ class IRLToERLStrategy(CandleStrategy):
                 target_1_2 = imps_fvg['entry'] + (2 * risk)
                 swing_high_target = self._get_nearest_swing_high(imps_fvg['entry'])
                 imps_fvg['target'] = max(target_1_2, swing_high_target)
-                
+
+                self.enter_trade(imps_fvg['entry'], imps_fvg['stop_loss'], imps_fvg['target'])
                 # Enter trade for IMPS
                 if self.entry_callback:
                     self.entry_callback(imps_fvg)
                 return imps_fvg
-            
+
             # Look for CISD (passing open of bear candles) - IRLtoERL specific
             cisd_trigger = self._detect_irl_to_erl_cisd()
             if cisd_trigger:
@@ -318,7 +326,7 @@ class IRLToERLStrategy(CandleStrategy):
                     print(f"   Entry: {cisd_trigger['entry']:.2f}")
                     print(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
                     print(f"   Target: {cisd_trigger['target']:.2f}")
-                
+
                 # Override stop loss with FVG low
                 cisd_trigger['stop_loss'] = self.stung_fvg['lower']
                 # Calculate target (1:2 RR or nearest swing high)
@@ -326,7 +334,7 @@ class IRLToERLStrategy(CandleStrategy):
                 target_1_2 = cisd_trigger['entry'] + (2 * risk)
                 swing_high_target = self._get_nearest_swing_high(cisd_trigger['entry'])
                 cisd_trigger['target'] = max(target_1_2, swing_high_target)
-                
+                self.enter_trade(cisd_trigger['entry'], cisd_trigger['stop_loss'], cisd_trigger['target'])
                 # Enter trade for CISD
                 if self.entry_callback:
                     self.entry_callback(cisd_trigger)
@@ -336,9 +344,9 @@ class IRLToERLStrategy(CandleStrategy):
                 self.logger.info(f"   ⏳ Waiting for close >= sting target ({self.sting_target_upper:.2f}). Current close: {candle_1m.close:.2f}")
             else:
                 print(f"   ⏳ Waiting for close >= sting target ({self.sting_target_upper:.2f}). Current close: {candle_1m.close:.2f}")
-        
+
         return None
-    
+
     def _get_nearest_swing_high(self, entry_price: float) -> float:
         """
         Get the nearest swing high above entry price
@@ -358,13 +366,7 @@ class IRLToERLStrategy(CandleStrategy):
                     nearest_high = high
         
         return nearest_high if nearest_high else entry_price + (2 * (entry_price - self.stung_fvg['lower']))
-    
-    def reset_sting_detection(self):
-        """Reset sting detection after entering trade"""
-        self.sting_detected = False
-        self.stung_fvg = None
-        self.sting_target_upper = None
-    
+
     def _detect_irl_to_erl_fvg(self):
         """Detect 1-minute bullish FVG for IRLtoERL strategy (no trade execution)"""
         if not hasattr(self, 'current_1min_candle') or not self.current_1min_candle:
@@ -434,24 +436,7 @@ class IRLToERLStrategy(CandleStrategy):
                 }
         
         return None
-    
-    def update_price(self, price: float, timestamp):
-        """Update strategy with current price (for live mode)"""
-        if not self.initialized:
-            return
-        
-        # Create a simple candle from the price (live mode limitation)
-        current_candle = Candle(
-            timestamp=timestamp,
-            open_price=price,
-            high=price,
-            low=price,
-            close=price
-        )
-        
-        # Update with the candle
-        self.update_1m_candle(current_candle)
-    
+
     def get_strategy_status(self) -> Dict:
         """Get current strategy status"""
         return {
@@ -466,6 +451,3 @@ class IRLToERLStrategy(CandleStrategy):
             'sting_target_upper': self.sting_target_upper,
             'liquidity_summary': self.liquidity_tracker.get_liquidity_summary()
         }
-
-    def _set_initial_sting_targets(self, candles_5min, candles_15min):
-        pass
