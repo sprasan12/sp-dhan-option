@@ -21,7 +21,6 @@ class CandleData:
     def __init__(self, tick_size=0.05, logger=None, strategy_manager=None):
         self.tick_size = tick_size
         self.logger = logger
-        self.strategy_manager = strategy_manager
         self.on_5min_candle_complete = None  # Callback for 5-minute candle completion
         
         # Candle storage - only 5m and 1m
@@ -43,14 +42,11 @@ class CandleData:
         self.session_low_time = None
         
         # Bear candle tracking for CISD
-        self.last_bear_candles = deque(maxlen=10)
+        self.last_bear_candles = deque(maxlen=50)
         
         if self.logger:
             self.logger.info("CandleData initialized")
-    
-    def set_strategy_manager(self, strategy_manager):
-        """Set the strategy manager for trade detection"""
-        self.strategy_manager = strategy_manager
+
     
     def set_5min_candle_callback(self, callback):
         """Set callback function for 5-minute candle completion"""
@@ -90,27 +86,21 @@ class CandleData:
             if self.current_1min_candle:
                 self.one_min_candles.append(self.current_1min_candle)
                 self.last_1min_candle_time = timestamp
-
-                # Update 5-minute candle
-                self._update_5min_candle(self.current_1min_candle.close, timestamp)
-
-                # Process through strategy manager if available
-                if self.strategy_manager:
-                    trade_trigger = self.strategy_manager.update_1min_candle(self.current_1min_candle, timestamp)
-                    if trade_trigger:
-                        if self.logger:
-                            self.logger.info(
-                                f"🎯 TRADE TRIGGERED: {trade_trigger['strategy_name']} - Entry: {trade_trigger['entry']:.2f}")
-                        return trade_trigger
                 if self.logger:
                     self.logger.log_1min_candle_completion(self.current_1min_candle)
                 else:
                     print(
                         f"📊 1-Min Candle Completed: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')} - O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
 
+                # Update 5-minute candle
+                self._update_5min_candle(self.current_1min_candle.close, timestamp)
+
             # Create new 1-minute candle
             self.current_1min_candle = Candle(candle_start_time, price, price, price, price)
-            print(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
+            if self.logger:
+                self.logger.info(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
+            else:
+                print(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
             self.last_1min_candle_time = candle_start_time
         else:
             # Update existing 1-minute candle
@@ -162,15 +152,7 @@ class CandleData:
         
         # Update 5-minute candle
         self._update_5min_candle(candle_data['close'], timestamp)
-        
-        # Process through strategy manager if available
-        if self.strategy_manager:
-            trade_trigger = self.strategy_manager.update_1min_candle(candle_data, timestamp)
-            if trade_trigger:
-                if self.logger:
-                    self.logger.info(f"🎯 TRADE TRIGGERED: {trade_trigger['strategy_name']} - Entry: {trade_trigger['entry']:.2f}")
-                return trade_trigger
-        
+
         return None
     
     def _update_5min_candle(self, price, timestamp):

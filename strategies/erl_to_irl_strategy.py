@@ -11,15 +11,15 @@ from strategies.implied_fvg_detector import ImpliedFVGDetector
 from utils.market_utils import round_to_tick
 from strategies.candle_strategy import CandleStrategy
 
-class ERLToIRLStrategy(CandleStrategy):
+class ERLToIRLStrategy():
     """Main strategy class for ERL to IRL trading"""
     
     def __init__(self, symbol: str, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None):
-        super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
+        #super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
         self.symbol = symbol
         self.tick_size = tick_size
         self.swing_look_back = swing_look_back
-        #self.logger = logger
+        self.logger = logger
         
         # Debug logging
         if self.logger:
@@ -82,18 +82,7 @@ class ERLToIRLStrategy(CandleStrategy):
             
             if self.logger:
                 self.logger.info(f"Set initial 5m sweep target: {recent_5m_low:.2f}")
-    
-    def update_price(self, price: float, symbol: str = None):
-        """Update strategy with current price (for live trading)"""
-        if not self.initialized:
-            return
-        
-        # For live trading, we would create a 1m candle from the price
-        # This is a simplified implementation
-        current_time = datetime.now()
-        current_candle = Candle(current_time, price, price, price, price)
-        self.update_1m_candle(current_candle)
-    
+
     def update_1m_candle(self, candle_1m: Candle):
         """
         Update strategy with new 1-minute candle
@@ -105,13 +94,10 @@ class ERLToIRLStrategy(CandleStrategy):
             return
         candle_data = {"open": candle_1m.open, "high": candle_1m.high,
                        "low": candle_1m.low, "close": candle_1m.close}
-
-        # Call parent class method to handle candle updates and trade logic
-
-        self.update_1min_candle_with_data(candle_data, candle_1m.timestamp)
-        
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_1m)
+        # Now need to check for sweeps and trade entries/exits through candle data helper methods
+
     
     def update_5m_candle(self, candle_5m: Candle):
         """
