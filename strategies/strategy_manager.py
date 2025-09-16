@@ -19,6 +19,10 @@ class StrategyManager:
     """
     
     def __init__(self, symbol: str, tick_size: float, logger: TradingLogger = None):
+        self.position_manager = None
+        self.current_target = None
+        self.current_stop_loss = None
+        self.entry_price = None
         self.symbol = symbol
         self.tick_size = tick_size
         self.logger = logger
@@ -54,7 +58,8 @@ class StrategyManager:
         erl_to_irl = ERLToIRLStrategy(
             symbol=self.symbol,
             tick_size=self.tick_size,
-            logger=self.logger
+            logger=self.logger,
+            candle_data=self.candle_data
         )
         self.strategies.append({
             'name': 'ERL_to_IRL',
@@ -66,7 +71,8 @@ class StrategyManager:
         irl_to_erl = IRLToERLStrategy(
             symbol=self.symbol,
             tick_size=self.tick_size,
-            logger=self.logger
+            logger=self.logger,
+            candle_data=self.candle_data
         )
         self.strategies.append({
             'name': 'IRL_to_ERL',
@@ -165,7 +171,7 @@ class StrategyManager:
                     strategy_info['enabled'] = False
         
         self.initialized = True
-        
+        self.candle_data.set_initial_5min_candle(candles_5min[-1])
         if self.logger:
             summary = self.liquidity_tracker.get_liquidity_summary()
             active_strategies = [s['name'] for s in self.strategies if s['enabled']]
@@ -222,10 +228,16 @@ class StrategyManager:
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle)
         
-        # If already in trade, don't check for new entries
+        # If already in trade, check for exits instead of new entries
         if self.in_trade:
             if self.logger:
-                self.logger.info(f"⏸️  ALREADY IN TRADE - Skipping strategy checks")
+                self.logger.info(f"⏸️  ALREADY IN TRADE - Checking for exits")
+            
+            # Check for stop loss or target hit
+            exit_result = self._check_for_trade_exit(candle)
+            if exit_result:
+                return exit_result
+            
             return None
         
         # Check all strategies sequentially until one triggers
@@ -242,7 +254,7 @@ class StrategyManager:
                     self.logger.info(f"🔍 CHECKING STRATEGY: {strategy_name}")
                 
                 # Update strategy with candle data
-                strategy.update_1m_candle(candle)
+                strategy.update_1m_candle( candle)
                 
                 # Check if strategy has triggered a trade
                 if hasattr(strategy, 'in_trade') and strategy.in_trade:
@@ -275,6 +287,76 @@ class StrategyManager:
         
         return None
     
+    def _check_for_trade_exit(self, candle: Candle) -> Optional[Dict]:
+        """
+        Check if current candle should trigger a trade exit (stop loss or target hit)
+        
+        Args:
+            candle: Current 1-minute candle
+        
+        Returns:
+            Exit trigger if found, None otherwise
+        """
+        if not self.current_trade:
+            return None
+        
+        current_price = candle.close
+        entry_price = self.current_trade['entry']
+        stop_loss = self.current_trade['stop_loss']
+        target = self.current_trade['target']
+        
+        # Check for stop loss hit (price went below stop loss)
+        if current_price <= stop_loss:
+            if self.logger:
+                self.logger.info(f"🛑 STOP LOSS HIT!")
+                self.logger.info(f"   Current Price: {current_price:.2f}")
+                self.logger.info(f"   Stop Loss: {stop_loss:.2f}")
+                self.logger.info(f"   Entry Price: {entry_price:.2f}")
+            
+            # Reset trade state
+            self.in_trade = False
+            self.current_trade = None
+            
+            # Call exit callback
+            if self.exit_callback:
+                self.exit_callback(current_price, "stop_loss")
+            
+            return {
+                'type': 'EXIT',
+                'exit_price': current_price,
+                'reason': 'stop_loss',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target
+            }
+        
+        # Check for target hit (price went above target)
+        if current_price >= target:
+            if self.logger:
+                self.logger.info(f"🎯 TARGET HIT!")
+                self.logger.info(f"   Current Price: {current_price:.2f}")
+                self.logger.info(f"   Target: {target:.2f}")
+                self.logger.info(f"   Entry Price: {entry_price:.2f}")
+            
+            # Reset trade state
+            self.in_trade = False
+            self.current_trade = None
+            
+            # Call exit callback
+            if self.exit_callback:
+                self.exit_callback(current_price, "target")
+            
+            return {
+                'type': 'EXIT',
+                'exit_price': current_price,
+                'reason': 'target',
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'target': target
+            }
+        
+        return None
+    
     def _get_trade_details_from_strategy(self, strategy, strategy_name: str) -> Optional[Dict]:
         """Extract trade details from a strategy"""
         try:
@@ -295,30 +377,7 @@ class StrategyManager:
                 self.logger.error(f"Error extracting trade details from {strategy_name}: {e}")
         
         return None
-    
-    def exit_trade(self, exit_price: float, reason: str):
-        """Exit current trade and reset state"""
-        if not self.in_trade:
-            return
-        
-        if self.logger:
-            self.logger.info(f"Exiting trade at {exit_price:.2f}, reason: {reason}")
-        
-        # Reset trade state
-        self.in_trade = False
-        self.current_trade = None
-        
-        # Reset all strategies
-        for strategy_info in self.strategies:
-            if strategy_info['enabled']:
-                strategy = strategy_info['strategy']
-                if hasattr(strategy, 'exit_trade'):
-                    strategy.exit_trade(exit_price, reason)
-        
-        # Call exit callback
-        if self.exit_callback:
-            self.exit_callback(exit_price, reason)
-    
+
     def get_status(self) -> Dict:
         """Get current status of all strategies and trade state"""
         status = {

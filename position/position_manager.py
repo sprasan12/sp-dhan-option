@@ -9,7 +9,8 @@ from utils.market_utils import round_to_tick
 class PositionManager:
     """Manages trading positions, orders, and risk management"""
     
-    def __init__(self, broker, account_manager, tick_size=0.05):
+    def __init__(self, broker, account_manager, tick_size=0.05, instruments_df=None):
+        self.instruments_df = instruments_df
         self.broker = broker
         self.account_manager = account_manager
         self.tick_size = tick_size
@@ -68,7 +69,7 @@ class PositionManager:
             self.current_position = None
             print("✅ Order cleanup completed")
     
-    def enter_trade_with_trigger(self, trigger, trigger_type, symbol, instruments_df):
+    def enter_trade_with_trigger(self, trigger, trigger_type, symbol):
         """Enter trade based on IMPS or CISD trigger with account manager integration"""
         # Check if we're already trading
         if self.is_trading:
@@ -144,7 +145,7 @@ class PositionManager:
                 side="BUY",
                 target_price=take_profit,
                 stop_loss_price=stop_loss,
-                instruments_df=instruments_df
+                instruments_df=self.instruments_df
             )
             
             if not buy_order:

@@ -40,9 +40,17 @@ class CandleData:
         self.session_low = None
         self.session_high_time = None
         self.session_low_time = None
+
+        self.sweep_target = None
+        self.sweep_set_time = None
+        self.target_swept = False
+        self.sweep_target_invalidated = False
+        self.two_CR_valid = False
+        self.count_five_min_close_below_sweep = 0
+        self.deepest_sweep_candle = None # candle that swept max depth into target
         
         # Bear candle tracking for CISD
-        self.last_bear_candles = deque(maxlen=50)
+        self.last_consecutive_bear_candles = deque(maxlen=10)
         
         if self.logger:
             self.logger.info("CandleData initialized")
@@ -95,6 +103,7 @@ class CandleData:
                 # Update 5-minute candle
                 self._update_5min_candle(self.current_1min_candle.close, timestamp)
 
+
             # Create new 1-minute candle
             self.current_1min_candle = Candle(candle_start_time, price, price, price, price)
             if self.logger:
@@ -130,6 +139,19 @@ class CandleData:
         if self.current_1min_candle:
             self.one_min_candles.append(self.current_1min_candle)
             self._classify_and_analyze_1min_candle(self.current_1min_candle)
+            if self.sweep_target is None:
+                #check last 5 min candle, if BEAR/Neutral, then last 5min low as sweep target
+                if self.current_5min_candle:
+                    candle_type = self.get_candle_type(self.current_5min_candle)
+                    if candle_type in ["BEAR", "NEUTRAL"]:
+                        self.sweep_target = self.current_5min_candle.low
+                        self.sweep_set_time = self.current_1min_candle.timestamp
+                        self.target_swept = False
+                        self.sweep_target_invalidated = False
+                        self.two_CR_valid = True
+                        self.count_five_min_close_below_sweep = 0
+                        if self.logger:
+                            self.logger.info(f"🎯 Sweep target set at {self.sweep_target:.2f} from 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
             
             # Log completed 1m candle
             if self.logger:
@@ -174,7 +196,25 @@ class CandleData:
             if self.current_5min_candle:
                 self.five_min_candles.append(self.current_5min_candle)
                 self._classify_and_analyze_5min_candle(self.current_5min_candle)
-                
+                if self.sweep_target and not self.target_swept:
+                    if self.current_5min_candle.close < self.sweep_target:
+                        self.count_five_min_close_below_sweep += 1
+                        if self.count_five_min_close_below_sweep >= 2:
+                            self.sweep_target_invalidated = True
+                            self.two_CR_valid = False
+                            self.sweep_target = None
+                            if self.logger:
+                                self.logger.warning(f"⚠️ Sweep target {self.sweep_target:.2f} invalidated after {self.count_five_min_close_below_sweep} closes below target")
+                        else:
+                            self.two_CR_valid = True
+                    else:
+                        if self.get_candle_type(self.current_5min_candle) in ("BEAR", "NEUTRAL"):
+                            self.sweep_target = self.current_5min_candle.low
+                            self.sweep_set_time = self.current_5min_candle.timestamp
+                            if self.logger:
+                                self.logger.info(f"🎯 Sweep target adjusted to {self.sweep_target:.2f} from 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
+                            self.count_five_min_close_below_sweep = 0
+
                 # Log completed 5m candle
                 if self.logger:
                     candle_type = self.get_candle_type(self.current_5min_candle)
@@ -245,7 +285,9 @@ class CandleData:
         
         # Track bear candles for CISD
         if candle_type == "BEAR":
-            self.last_bear_candles.append(candle)
+            self.last_consecutive_bear_candles.append(candle)
+        elif candle_type == "BULL":
+            self.last_consecutive_bear_candles.clear()
         
         if self.logger:
             self.logger.debug(f"1-Min Candle Analysis: {candle_type} - Session High: {self.session_high:.2f}, Session Low: {self.session_low:.2f}")
@@ -298,6 +340,9 @@ class CandleData:
         if candle:
             self.current_5min_candle = candle
             self.last_5min_candle_time = candle.timestamp
+            self.sweep_target = candle.low
+            self.sweep_set_time = candle.timestamp
+            self.target_swept = False
             if self.logger:
                 self.logger.info(f"Set initial 5-minute candle: {candle.timestamp.strftime('%H:%M:%S')} - O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
     
@@ -311,7 +356,7 @@ class CandleData:
     
     # ==================== UTILITY METHODS ====================
     
-    def check_sweep_conditions(self, target_price: float, candle_time: datetime) -> bool:
+    def check_for_sweep(self, candle_time: datetime) -> bool:
         """
         Check if current 1m candle sweeps the target price
         
@@ -326,11 +371,27 @@ class CandleData:
             return False
         
         # Only check for sweep in candles that come AFTER the target was set
-        if candle_time and self.current_1min_candle.timestamp <= candle_time:
+        if candle_time and self.current_1min_candle.timestamp < candle_time:
             return False
+
+        if self.target_swept:
+            if self.get_candle_type(self.current_1min_candle) == "BULL":
+                self.deepest_sweep_candle = self.current_1min_candle
+            else:
+                self.deepest_sweep_candle = None
+            return True
+
         
         # Check if this 1-minute candle sweeps the target
-        return self.current_1min_candle.low < target_price
+        if self.sweep_target:
+            if self.current_1min_candle.low < self.sweep_target:
+                self.target_swept = True
+                if self.get_candle_type(self.current_1min_candle) == "BULL":
+                    self.deepest_sweep_candle = self.current_1min_candle
+                else:
+                    self.deepest_sweep_candle = None
+                return True
+        return False
     
     def detect_imps(self, target_ratio: float = 2.0) -> Optional[Dict]:
         """
@@ -375,7 +436,8 @@ class CandleData:
     
     def detect_cisd(self, target_ratio: float = 2.0) -> Optional[Dict]:
         """
-        Detect CISD (passing open of bear candles)
+        Detect CISD (current close passing the open of the earliest candle in the
+        most recent consecutive bear run), with a fallback using the deepest-sweep candle.
         
         Args:
             target_ratio: Risk-reward ratio for target calculation
@@ -383,27 +445,49 @@ class CandleData:
         Returns:
             Dictionary with trade details if CISD found, None otherwise
         """
-        if not self.current_1min_candle or not self.last_bear_candles:
+        # Must have a current 1m candle
+        if not self.current_1min_candle:
             return None
-        
-        # Check if current candle passes the open of any bear candle
-        for bear_candle in self.last_bear_candles:
-            if self.current_1min_candle.close > bear_candle.open:
-                entry = bear_candle.open
-                stop_loss = bear_candle.low
+
+
+        # 1) Consecutive-bear run condition
+        if self.last_consecutive_bear_candles and len(self.last_consecutive_bear_candles) > 0:
+            # deque is in chronological order (older -> newer)
+            first_bear_candle = self.last_consecutive_bear_candles[0]   # earliest in the run
+            last_bear_candle = self.last_consecutive_bear_candles[-1]   # most recent in the run
+
+            # Trigger when current close passes the open of the earliest bear in the run
+            if self.current_1min_candle.close >= first_bear_candle.open:
+                entry = first_bear_candle.open
+                stop_loss = last_bear_candle.low
                 target = entry + (entry - stop_loss) * target_ratio
-                
+
                 return {
                     'type': 'CISD',
                     'entry': round_to_tick(entry, self.tick_size),
                     'stop_loss': round_to_tick(stop_loss, self.tick_size),
                     'target': round_to_tick(target, self.tick_size),
-                    'bear_candle': bear_candle
+                    'entry_candle': self.current_1min_candle
                 }
-        
+
+        # 2) Fallback: use deepest sweep candle if available
+        if self.deepest_sweep_candle:
+            if self.current_1min_candle.close >= self.deepest_sweep_candle.close:
+                entry = self.deepest_sweep_candle.close
+                stop_loss = self.deepest_sweep_candle.low
+                target = entry + (entry - stop_loss) * target_ratio
+
+                return {
+                    'type': 'CISD',
+                    'entry': round_to_tick(entry, self.tick_size),
+                    'stop_loss': round_to_tick(stop_loss, self.tick_size),
+                    'target': round_to_tick(target, self.tick_size),
+                    'entry_candle': self.current_1min_candle
+                }
+
         return None
     
-    def detect_sting(self, bullish_zones: List[Dict]) -> Optional[Dict]:
+    def check_for_sting(self, bullish_zones: List[Dict]) -> Optional[Dict]:
         """
         Detect if current 1m candle stings into bullish FVG/IFVG zones
         
@@ -481,5 +565,5 @@ class CandleData:
             'session_low': self.session_low,
             'total_1min_candles': len(self.one_min_candles),
             'total_5min_candles': len(self.five_min_candles),
-            'bear_candles_count': len(self.last_bear_candles)
+            'bear_candles_count': len(self.last_consecutive_bear_candles)
         }

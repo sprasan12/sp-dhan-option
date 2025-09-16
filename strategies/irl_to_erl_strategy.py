@@ -17,7 +17,7 @@ class IRLToERLStrategy():
     """
     
     def __init__(self, symbol: str, tick_size: float = 0.05, swing_look_back: int = 2, 
-                 logger = None, exit_callback=None, entry_callback=None):
+                 logger = None, exit_callback=None, entry_callback=None, candle_data=None):
         #super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
         
         self.symbol = symbol
@@ -36,6 +36,7 @@ class IRLToERLStrategy():
         # Initialize sting detection state
         self.sting_detected = False
         self.stung_fvg = None
+        self.candle_data = candle_data if candle_data else {}
         
         if self.logger:
             self.logger.info(f"IRL to ERL Strategy initialized for {symbol}")
@@ -111,12 +112,30 @@ class IRLToERLStrategy():
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_1m)
 
-        # Check for sting detection on every 1m candle
-        self.c(candle_1m)
-        
-        # If sting detected, check for CISD/IMPS triggers
-        if self.sting_detected:
-            self._check_cisd_imps_triggers(candle_1m)
+        if self.candle_data.check_for_sting(self.liquidity_tracker.get_bullish_fvgs()+self.liquidity_tracker.get_bullish_ifvgs()):
+            if self.logger:
+                self.logger.info(f"Sweep conditions met at {candle_1m.timestamp}")
+            cisd_trigger = self.candle_data.detect_cisd()
+            if cisd_trigger:
+                if self.logger:
+                    self.logger.info(f"✅ CISD  Found!")
+                    self.logger.info(f"   Symbol: {self.symbol}")
+                    self.logger.info(f"   Candle Time: {candle_1m.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   Entry: {cisd_trigger['entry']:.2f}")
+                    self.logger.info(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
+                    self.logger.info(f"   Target: {cisd_trigger['target']:.2f}")
+                
+                # Set strategy state before calling callback
+                self.in_trade = True
+                self.entry_price = cisd_trigger['entry']
+                self.current_stop_loss = cisd_trigger['stop_loss']
+                self.current_target = cisd_trigger['target']
+                self.trade_type = 'CISD'
+                
+                # Execute trade entry callback
+                if self.entry_callback:
+                    self.entry_callback(self.symbol, "IRLtoERL", cisd_trigger)
+                return cisd_trigger
     
     def update_5m_candle(self, candle_5m: Candle):
         """
@@ -155,13 +174,12 @@ class IRLToERLStrategy():
         """Get current strategy status"""
         return {
             'initialized': self.initialized,
-            'in_trade': self.in_trade,
+            'in_trade': getattr(self, 'in_trade', False),
             'trade_type': getattr(self, 'trade_type', None),
-            'entry_price': self.entry_price,
-            'stop_loss': self.current_stop_loss,
-            'target': self.current_target,
-            'sting_detected': self.sting_detected,
-            'stung_fvg': self.stung_fvg,
-            'sting_target_upper': self.sting_target_upper,
+            'entry_price': getattr(self, 'entry_price', None),
+            'stop_loss': getattr(self, 'current_stop_loss', None),
+            'target': getattr(self, 'current_target', None),
+            'sting_detected': getattr(self, 'sting_detected', False),
+            'stung_fvg': getattr(self, 'stung_fvg', None),
             'liquidity_summary': self.liquidity_tracker.get_liquidity_summary()
         }

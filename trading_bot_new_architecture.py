@@ -39,7 +39,13 @@ class NewArchitectureTradingBot:
         # Load configuration
         self.config = TradingConfig()
         self.config.print_config()
-        
+
+        # Market data
+        self.instruments_df = None
+        self.websocket = None
+        self.demo_server = None
+        self.demo_client = None
+
         # Initialize logger
         self.logger = TradingLogger(
             log_dir=self.config.log_dir,
@@ -59,7 +65,7 @@ class NewArchitectureTradingBot:
             self.broker = DemoBroker(account_manager=self.account_manager)
         
         # Initialize position manager
-        self.position_manager = PositionManager(self.broker, self.account_manager, self.config.tick_size)
+        self.position_manager = PositionManager(self.broker, self.account_manager, self.config.tick_size, self.instruments_df)
         
         # Initialize historical data fetcher
         if self.config.is_live_mode():
@@ -89,11 +95,7 @@ class NewArchitectureTradingBot:
             exit_callback=self._on_strategy_trade_exit
         )
         
-        # Market data
-        self.instruments_df = None
-        self.websocket = None
-        self.demo_server = None
-        self.demo_client = None
+
         
         # Signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -453,7 +455,15 @@ class NewArchitectureTradingBot:
                 # Update strategy manager with new price
                 trade_trigger = self.strategy_manager.candle_data.update_1min_candle(price, timestamp)
                 if trade_trigger:
-                    self.logger.info(f"🎯 Trade triggered from live data: {trade_trigger['strategy_name']}")
+                    if trade_trigger.get('type') == 'EXIT':
+                        self.logger.info(f"🚪 Trade exit triggered: {trade_trigger['reason']}")
+                        # Handle trade exit through position manager
+                        self.position_manager.handle_trade_exit(
+                            exit_price=trade_trigger['exit_price'],
+                            exit_reason=trade_trigger['reason']
+                        )
+                    else:
+                        self.logger.info(f"🎯 Trade triggered from live data: {trade_trigger.get('strategy_name', 'Unknown')}")
                     
         except Exception as e:
             self.logger.error(f"Error processing WebSocket message: {e}")
@@ -467,9 +477,20 @@ class NewArchitectureTradingBot:
             self.logger.info(f"   OHLC: O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
             
             # Process candle through strategy manager
-            trade_trigger = self.strategy_manager.candle_data.update_1min_candle_with_data(candle_data, timestamp)
+            self.strategy_manager.candle_data.update_1min_candle_with_data(candle_data, timestamp)
+            trade_trigger = self.strategy_manager.update_1min_candle(candle_data, timestamp)
+
             if trade_trigger:
-                self.logger.info(f"🎯 Trade triggered from demo data: {trade_trigger['strategy_name']}")
+                if trade_trigger.get('type') == 'EXIT':
+                    self.logger.info(f"🚪 Trade exit triggered: {trade_trigger['reason']}")
+                    # Handle trade exit through position manager
+                    self.position_manager.handle_trade_exit(
+                        exit_price=trade_trigger['exit_price'],
+                        exit_reason=trade_trigger['reason']
+                    )
+                    self.strategy_manager.candle_data.detect_cisd()
+                else:
+                    self.logger.info(f"🎯 Trade triggered from demo data: {trade_trigger.get('strategy_name', 'Unknown')}")
             
         except Exception as e:
             self.logger.error(f"❌ Error processing demo data: {e}")
@@ -484,59 +505,84 @@ class NewArchitectureTradingBot:
         """Handle WebSocket close"""
         self.logger.info(f"WebSocket closed: {close_status_code} - {close_msg}")
     
-    def _on_strategy_trade_entry(self, trigger):
+    def _on_strategy_trade_entry(self, symbol, strategy_name, trigger):
         """Handle trade entry from strategy"""
+        """Enter a trade and set initial parameters"""
+        self.in_trade = True
+        self.entry_price = trigger['entry']
+        self.current_stop_loss = trigger['stop_loss']
+        self.current_target = trigger['target']
+
         try:
-            entry_price = trigger.get('entry', 0)
-            stop_loss = trigger.get('stop_loss', 0)
-            target = trigger.get('target', 0)
-            strategy_name = trigger.get('strategy_name', 'Unknown')
-            
-            self.logger.info(f"💰 TRADE ENTRY TRIGGERED!")
-            self.logger.info(f"   📊 Strategy: {strategy_name}")
-            self.logger.info(f"   📈 Entry: {entry_price:.2f}")
-            self.logger.info(f"   🛑 Stop Loss: {stop_loss:.2f}")
-            self.logger.info(f"   🎯 Target: {target:.2f}")
-            self.logger.info(f"   💰 Risk: {entry_price - stop_loss:.2f}")
-            self.logger.info(f"   💎 Reward: {target - entry_price:.2f}")
-            
-            # Enter trade using position manager
-            success = self.position_manager.enter_trade(
-                symbol=self.config.symbol,
-                entry_price=entry_price,
-                stop_loss=stop_loss,
-                target=target,
-                trigger_type=strategy_name,
-                instruments_df=self.instruments_df
+            # Execute the trade through position manager
+            success = self.position_manager.enter_trade_with_trigger(
+                trigger=trigger,
+                trigger_type="CISD",
+                symbol=symbol
             )
-            
+
             if success:
-                self.logger.info(f"✅ Trade entered successfully for {self.config.symbol}!")
+                if self.logger:
+                    self.logger.info(f"✅ {strategy_name} trade entered successfully")
             else:
-                self.logger.error(f"❌ Failed to enter trade for {self.config.symbol}")
-                # Reset strategy manager
-                self.strategy_manager.exit_trade(entry_price, "order_failed")
-                    
+                if self.logger:
+                    self.logger.error(f"❌ Failed to enter {strategy_name} trade")
+
         except Exception as e:
-            self.logger.error(f"Error handling trade entry: {e}")
+            if self.logger:
+                self.logger.error(f"Error in {strategy_name} trade entry: {e}")
+
+            if self.logger:
+                # Debug: confirm trade state set on this instance
+                try:
+                    self.logger.debug(
+                        f"🎯 TRADE ENTERED! symbol={getattr(self, 'symbol', 'Unknown')} in_trade={self.in_trade} entry={self.entry_price} sl={self.current_stop_loss} tgt={self.current_target} id={id(self)}")
+                except Exception:
+                    pass
+                self.logger.log_trade_entry(
+                    self.entry_price, self.current_stop_loss, self.current_target,
+                    "STRATEGY"
+                )
+            else:
+                print(f"🎯 TRADE ENTERED!")
+                print(f"   Entry: {self.entry_price:.2f}")
+                print(f"   Stop Loss: {self.current_stop_loss:.2f}")
+                print(f"   Target: {self.current_target:.2f}")
+                print(f"   Risk: {self.entry_price - self.current_stop_loss:.2f}")
+                print(f"   Reward: {self.current_target - self.entry_price:.2f}")
+                print(
+                    f"   RR Ratio: {(self.current_target - self.entry_price) / (self.entry_price - self.current_stop_loss):.2f}")
     
-    def _on_strategy_trade_exit(self, exit_price, reason):
-        """Handle trade exit from strategy"""
-        try:
-            self.logger.info(f"🚪 TRADE EXIT TRIGGERED!")
-            self.logger.info(f"   💰 Exit Price: {exit_price:.2f}")
-            self.logger.info(f"   📝 Reason: {reason}")
-            
-            # Close position using position manager
-            success = self.position_manager.close_position(self.config.symbol)
-            
-            if success:
-                self.logger.info(f"✅ Position closed successfully for {self.config.symbol}")
+    def _on_strategy_trade_exit(self, exit_price, reason, account_balance=None):
+        """Exit a trade and reset parameters"""
+        if self.in_trade:
+            pnl = exit_price - self.entry_price
+
+            if self.logger:
+                self.logger.log_trade_exit(exit_price, reason, self.entry_price, pnl, account_balance)
             else:
-                self.logger.error(f"❌ Failed to close position for {self.config.symbol}")
-            
-        except Exception as e:
-            self.logger.error(f"Error handling trade exit: {e}")
+                print(f"🚪 TRADE EXITED - {reason}")
+                print(f"   Symbol: {getattr(self, 'symbol', 'Unknown')}")
+                print(
+                    f"   Exit Time: {self.candle_data.current_1min_candle.timestamp.strftime('%H:%M:%S') if self.candle_data.current_1min_candle else 'Unknown'}")
+                print(f"   Entry: {self.entry_price:.2f}")
+                print(f"   Exit: {exit_price:.2f}")
+                print(f"   P&L: {pnl:.2f}")
+                if account_balance is not None:
+                    print(f"   Account Balance: ₹{account_balance:.2f}")
+
+            # Reset trade parameters
+            self.in_trade = False
+            self.entry_price = None
+            self.current_stop_loss = None
+            self.current_target = None
+
+            self.strategy_manager.candle_data.sweep_target = None
+            self.strategy_manager.candle_data.sweep_set_time = None
+            self.strategy_manager.candle_data.target_swept = False
+            self.strategy_manager.candle_data.sweep_target_invalidated = False
+            self.strategy_manager.candle_data.two_CR_valid = True
+            self.strategy_manager.candle_data.count_five_min_close_below_sweep = 0
     
     def _close_all_positions(self):
         """Close all open positions"""

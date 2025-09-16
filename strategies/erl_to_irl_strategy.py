@@ -6,6 +6,7 @@ Trades price movement from External Range Liquidity (ERL) to Internal Range Liqu
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime, timedelta
 from models.candle import Candle
+from strategies.candle_data import CandleData
 from strategies.liquidity_tracker import LiquidityTracker, LiquidityZone
 from strategies.implied_fvg_detector import ImpliedFVGDetector
 from utils.market_utils import round_to_tick
@@ -14,7 +15,7 @@ from strategies.candle_strategy import CandleStrategy
 class ERLToIRLStrategy():
     """Main strategy class for ERL to IRL trading"""
     
-    def __init__(self, symbol: str, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None):
+    def __init__(self, symbol: str, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None, candle_data=None):
         #super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
         self.symbol = symbol
         self.tick_size = tick_size
@@ -31,6 +32,9 @@ class ERLToIRLStrategy():
         
         # Strategy state
         self.initialized = False
+
+        self.sweep_detected = False
+        self.candle_data = candle_data if candle_data else {}
 
     
     def set_callbacks(self, entry_callback=None, exit_callback=None):
@@ -79,6 +83,7 @@ class ERLToIRLStrategy():
             # Set 5m low as target for 1m sweeps
             recent_5m_low = candles_5min[-1].low
             self.sweep_low_5m = recent_5m_low
+
             
             if self.logger:
                 self.logger.info(f"Set initial 5m sweep target: {recent_5m_low:.2f}")
@@ -96,6 +101,32 @@ class ERLToIRLStrategy():
                        "low": candle_1m.low, "close": candle_1m.close}
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_1m)
+
+        if self.candle_data.check_for_sweep(candle_1m.timestamp):
+            if self.logger:
+                self.logger.info(f"Sweep conditions met at {candle_1m.timestamp}")
+            cisd_trigger = self.candle_data.detect_cisd()
+            if cisd_trigger:
+                if self.logger:
+                    self.logger.info(f"✅ CISD  Found!")
+                    self.logger.info(f"   Symbol: {self.symbol}")
+                    self.logger.info(f"   Candle Time: {candle_1m.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   Entry: {cisd_trigger['entry']:.2f}")
+                    self.logger.info(f"   Stop Loss: {cisd_trigger['stop_loss']:.2f}")
+                    self.logger.info(f"   Target: {cisd_trigger['target']:.2f}")
+                
+                # Set strategy state before calling callback
+                self.in_trade = True
+                self.entry_price = cisd_trigger['entry']
+                self.current_stop_loss = cisd_trigger['stop_loss']
+                self.current_target = cisd_trigger['target']
+                self.trade_type = 'CISD'
+                
+                # Execute trade entry callback
+                if self.entry_callback:
+                    self.entry_callback(self.symbol, "ERLtoIRL", cisd_trigger)
+                return cisd_trigger
+
         # Now need to check for sweeps and trade entries/exits through candle data helper methods
 
     
@@ -122,16 +153,14 @@ class ERLToIRLStrategy():
         """Get current strategy status"""
         return {
             'initialized': self.initialized,
-            'in_trade': self.in_trade,
+            'in_trade': getattr(self, 'in_trade', False),
             'trade_type': getattr(self, 'trade_type', None),
-            'entry_price': self.entry_price,
-            'stop_loss': self.current_stop_loss,
-            'target': self.current_target,
+            'entry_price': getattr(self, 'entry_price', None),
+            'stop_loss': getattr(self, 'current_stop_loss', None),
+            'target': getattr(self, 'current_target', None),
             'liquidity_summary': self.liquidity_tracker.get_liquidity_summary(),
             'sweep_status': {
-                'waiting_for_sweep': self.waiting_for_sweep,
-                'sweep_detected': self.sweep_detected,
-                'sweep_low': self.sweep_low,
-                'recovery_low': self.recovery_low
+                'sweep_detected': getattr(self, 'sweep_detected', False),
+                'sweep_low_5m': getattr(self, 'sweep_low_5m', None)
             }
         }
