@@ -17,6 +17,11 @@ class ERLToIRLStrategy():
     
     def __init__(self, symbol: str, tick_size: float, swing_look_back=2, logger=None, exit_callback=None, entry_callback=None, candle_data=None):
         #super().__init__(tick_size, swing_look_back, logger, exit_callback, entry_callback)
+        self.trade_type = None
+        self.current_target = None
+        self.current_stop_loss = None
+        self.entry_price = None
+        self.in_trade = None
         self.symbol = symbol
         self.tick_size = tick_size
         self.swing_look_back = swing_look_back

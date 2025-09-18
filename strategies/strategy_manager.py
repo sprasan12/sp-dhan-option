@@ -227,11 +227,17 @@ class StrategyManager:
         
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle)
+        # Process completed 1-minute candle through liquidity tracker for swing low detection
+        self.liquidity_tracker.process_candle(candle, '1min', self.symbol)
+       
         
-        # If already in trade, check for exits instead of new entries
+        # If already in trade, check for exits and trailing stops
         if self.in_trade:
             if self.logger:
-                self.logger.info(f"⏸️  ALREADY IN TRADE - Checking for exits")
+                self.logger.info(f"⏸️  ALREADY IN TRADE - Checking for exits and trailing stops")
+            
+            # Check for trailing stop opportunities (swing lows)
+            self._check_for_trailing_stop(candle)
             
             # Check for stop loss or target hit
             exit_result = self._check_for_trade_exit(candle)
@@ -262,7 +268,19 @@ class StrategyManager:
                     trade_details = self._get_trade_details_from_strategy(strategy, strategy_name)
                     if trade_details:
                         self.in_trade = True
+                        # Enrich trade details with initial risk snapshot for trailing logic
+                        try:
+                            initial_sl = trade_details.get('stop_loss')
+                            entry_px = trade_details.get('entry')
+                            initial_risk = (entry_px - initial_sl) if (entry_px is not None and initial_sl is not None) else None
+                            trade_details['initial_stop_loss'] = initial_sl
+                            trade_details['initial_risk'] = initial_risk
+                        except Exception:
+                            pass
+
                         self.current_trade = trade_details
+                        # Reset exit emission guard for new trade
+                        self._exit_emitted = False
                         
                         if self.logger:
                             self.logger.info(f"🎯 TRADE TRIGGERED BY {strategy_name.upper()} STRATEGY!")
@@ -297,16 +315,30 @@ class StrategyManager:
         Returns:
             Exit trigger if found, None otherwise
         """
+        # Debounce: avoid emitting multiple exits for the same candle timestamp
+        try:
+            candle_ts = candle.timestamp
+        except Exception:
+            candle_ts = None
+
+        # If an exit already emitted for current trade, skip
+        if getattr(self, "_exit_emitted", False):
+            return None
+
+        last_exit_ts = getattr(self, "_last_exit_ts", None)
+        if last_exit_ts and candle_ts and last_exit_ts == candle_ts:
+            return None
+
         if not self.current_trade:
             return None
         
         current_price = candle.close
-        entry_price = self.current_trade['entry']
-        stop_loss = self.current_trade['stop_loss']
-        target = self.current_trade['target']
+        entry_price = self.current_trade.get('entry')
+        stop_loss = self.current_trade.get('stop_loss')
+        target = self.current_trade.get('target')
         
         # Check for stop loss hit (price went below stop loss)
-        if current_price <= stop_loss:
+        if stop_loss is not None and current_price <= stop_loss:
             if self.logger:
                 self.logger.info(f"🛑 STOP LOSS HIT!")
                 self.logger.info(f"   Current Price: {current_price:.2f}")
@@ -316,6 +348,10 @@ class StrategyManager:
             # Reset trade state
             self.in_trade = False
             self.current_trade = None
+            # Mark exit emitted and store timestamp
+            self._exit_emitted = True
+            if candle_ts:
+                self._last_exit_ts = candle_ts
             
             # Call exit callback
             if self.exit_callback:
@@ -331,7 +367,7 @@ class StrategyManager:
             }
         
         # Check for target hit (price went above target)
-        if current_price >= target:
+        if target is not None and current_price >= target:
             if self.logger:
                 self.logger.info(f"🎯 TARGET HIT!")
                 self.logger.info(f"   Current Price: {current_price:.2f}")
@@ -341,6 +377,10 @@ class StrategyManager:
             # Reset trade state
             self.in_trade = False
             self.current_trade = None
+            # Mark exit emitted and store timestamp
+            self._exit_emitted = True
+            if candle_ts:
+                self._last_exit_ts = candle_ts
             
             # Call exit callback
             if self.exit_callback:
@@ -354,8 +394,123 @@ class StrategyManager:
                 'stop_loss': stop_loss,
                 'target': target
             }
+        # If target is None (trailing mode), we do not check target-based exits
+        if target is None and self.logger:
+            self.logger.debug("Skipping target check: target is None (trailing mode)")
         
         return None
+    
+    def _check_for_trailing_stop(self, candle: Candle) -> None:
+        """
+        Check for trailing stop opportunities based on swing lows and profit levels
+        
+        Args:
+            candle: Current 1-minute candle
+        """
+        if not self.current_trade or not self.position_manager:
+            return
+        
+        current_price = candle.close
+        current_stop_loss = self.current_trade['stop_loss']
+        entry_price = self.current_trade['entry']
+        
+        # Calculate current profit
+        profit = current_price - entry_price
+        risk = entry_price - current_stop_loss
+        profit_ratio = profit / risk if risk > 0 else 0
+        
+        # Check if we should activate profit-based trailing (after 1:1.5 profit)
+        should_trail = profit_ratio >= 1.5
+        
+        if should_trail:
+            # Look for 1-minute swing lows when in profit
+            recent_1min_swing_lows = []
+            for swing_low in self.liquidity_tracker.swing_lows:
+                # Only consider 1-minute swing lows that are higher than current stop loss
+                # and occurred after trade entry
+                if (swing_low.zone_type == "swing_low_1min" and
+                    swing_low.price_low is not None and
+                    current_stop_loss is not None and
+                    swing_low.price_low > current_stop_loss and 
+                    swing_low.timestamp and self.current_trade.get('timestamp') and
+                    swing_low.timestamp > self.current_trade.get('timestamp')):
+                    recent_1min_swing_lows.append(swing_low)
+            
+            if recent_1min_swing_lows:
+                # Find the highest 1-minute swing low that's still below current price
+                best_swing_low = None
+                for swing_low in recent_1min_swing_lows:
+                    if swing_low.price_low < current_price:
+                        if best_swing_low is None or swing_low.price_low > best_swing_low.price_low:
+                            best_swing_low = swing_low
+                
+                if best_swing_low and best_swing_low.price_low and current_stop_loss is not None and best_swing_low.price_low > current_stop_loss:
+                    new_stop_loss = best_swing_low.price_low
+                    
+                    if self.logger:
+                        self.logger.info(f"🔄 PROFIT-BASED TRAILING STOP!")
+                        self.logger.info(f"   Profit Ratio: {profit_ratio:.2f}:1")
+                        self.logger.info(f"   Current Stop Loss: {current_stop_loss:.2f}")
+                        self.logger.info(f"   New 1m Swing Low: {new_stop_loss:.2f}")
+                        self.logger.info(f"   Swing Low Time: {best_swing_low.timestamp.strftime('%H:%M:%S')}")
+                    
+                    # Update trailing stop through position manager
+                    self.position_manager.update_trailing_stop(current_price, new_stop_loss)
+                    
+                    # Update current trade stop loss
+                    self.current_trade['stop_loss'] = new_stop_loss
+                    if self.logger:
+                        self.logger.info(f"🔄 STOP LOSS MOVED → {new_stop_loss:.2f} (from {current_stop_loss:.2f})")
+                    
+                    # Remove target when trailing (let it run with trailing stop)
+                    if self.current_trade.get('target'):
+                        if self.logger:
+                            self.logger.info(f"🎯 TARGET REMOVED - Switching to trailing stop mode")
+                        self.current_trade['target'] = None
+            else:
+                if self.logger:
+                    self.logger.debug(f"No 1m swing-low trailing opportunity this candle (profit {profit_ratio:.2f}:1)")
+        else:
+            # Regular trailing for 5-minute swing lows (before profit target)
+            recent_5min_swing_lows = []
+            for swing_low in self.liquidity_tracker.swing_lows:
+                # Only consider 5-minute swing lows that are higher than current stop loss
+                # and occurred after trade entry
+                if (swing_low.zone_type == "swing_low_5min" and
+                    swing_low.price_low is not None and
+                    current_stop_loss is not None and
+                    swing_low.price_low > current_stop_loss and 
+                    swing_low.timestamp and self.current_trade.get('timestamp') and
+                    swing_low.timestamp > self.current_trade.get('timestamp')):
+                    recent_5min_swing_lows.append(swing_low)
+            
+            if recent_5min_swing_lows:
+                # Find the highest 5-minute swing low that's still below current price
+                best_swing_low = None
+                for swing_low in recent_5min_swing_lows:
+                    if swing_low.price_low < current_price:
+                        if best_swing_low is None or swing_low.price_low > best_swing_low.price_low:
+                            best_swing_low = swing_low
+                
+                if best_swing_low and best_swing_low.price_low and current_stop_loss is not None and best_swing_low.price_low > current_stop_loss:
+                    new_stop_loss = best_swing_low.price_low
+                    
+                    if self.logger:
+                        self.logger.info(f"🔄 REGULAR TRAILING STOP!")
+                        self.logger.info(f"   Current Stop Loss: {current_stop_loss:.2f}")
+                        self.logger.info(f"   New 5m Swing Low: {new_stop_loss:.2f}")
+                        self.logger.info(f"   Swing Low Time: {best_swing_low.timestamp.strftime('%H:%M:%S')}")
+                    
+                    # Update trailing stop through position manager
+                    self.position_manager.update_trailing_stop(current_price, new_stop_loss)
+                    
+                    # Update current trade stop loss
+                    self.current_trade['stop_loss'] = new_stop_loss
+                    if self.logger:
+                        self.logger.info(f"🔄 STOP LOSS MOVED → {new_stop_loss:.2f} (from {current_stop_loss:.2f})")
+            else:
+                if self.logger:
+                    self.logger.debug("No 5m swing-low trailing opportunity this candle")
     
     def _get_trade_details_from_strategy(self, strategy, strategy_name: str) -> Optional[Dict]:
         """Extract trade details from a strategy"""

@@ -7,6 +7,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
+import inspect
 
 class TradingLogger:
     """Custom logger for trading bot with file and console output"""
@@ -61,23 +62,46 @@ class TradingLogger:
     
     def debug(self, message):
         """Log debug message"""
-        self.logger.debug(message)
+        self.logger.debug(self._with_context_prefix(message))
     
     def info(self, message):
         """Log info message"""
-        self.logger.info(message)
+        self.logger.info(self._with_context_prefix(message))
     
     def warning(self, message):
         """Log warning message"""
-        self.logger.warning(message)
+        self.logger.warning(self._with_context_prefix(message))
     
     def error(self, message):
         """Log error message"""
-        self.logger.error(message)
+        self.logger.error(self._with_context_prefix(message))
     
     def critical(self, message):
         """Log critical message"""
         self.logger.critical(message)
+
+    def _with_context_prefix(self, message: str) -> str:
+        """Prefix log messages with calling class and method automatically.
+
+        Example: [StrategyManager._check_for_trailing_stop] message
+        """
+        try:
+            stack = inspect.stack()
+            # Skip this method and the public logger method (info/debug/...)
+            for frame_info in stack[2:]:
+                frame = frame_info.frame
+                func_name = frame_info.function
+                self_obj = frame.f_locals.get('self')
+                if self_obj is not None and self_obj.__class__.__name__ != 'TradingLogger':
+                    cls_name = self_obj.__class__.__name__
+                    return f"[{cls_name}.{func_name}] {message}"
+                module = inspect.getmodule(frame)
+                if module and module.__name__ != __name__:
+                    mod_name = getattr(module, '__name__', 'module')
+                    return f"[{mod_name}.{func_name}] {message}"
+        except Exception:
+            pass
+        return message
     
     def log_trade_entry(self, entry_price, stop_loss, target, trigger_type, symbol):
         """Log trade entry details"""

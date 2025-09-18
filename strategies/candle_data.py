@@ -135,24 +135,25 @@ class CandleData:
             close=candle_data['close']
         )
         
-        # Save previous candle if it exists
+        # Save previous candle if it exists (this would always be the case)
         if self.current_1min_candle:
             self.one_min_candles.append(self.current_1min_candle)
             self._classify_and_analyze_1min_candle(self.current_1min_candle)
             if self.sweep_target is None:
                 #check last 5 min candle, if BEAR/Neutral, then last 5min low as sweep target
-                if self.current_5min_candle:
-                    candle_type = self.get_candle_type(self.current_5min_candle)
+                prev_5min_candle = self.five_min_candles[-1] if self.five_min_candles else None
+                if prev_5min_candle:
+                    candle_type = self.get_candle_type(prev_5min_candle)
                     if candle_type in ["BEAR", "NEUTRAL"]:
-                        self.sweep_target = self.current_5min_candle.low
+                        self.sweep_target = prev_5min_candle.low
                         self.sweep_set_time = self.current_1min_candle.timestamp
                         self.target_swept = False
                         self.sweep_target_invalidated = False
                         self.two_CR_valid = True
                         self.count_five_min_close_below_sweep = 0
                         if self.logger:
-                            self.logger.info(f"🎯 Sweep target set at {self.sweep_target:.2f} from 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
-            
+                            self.logger.info(f"🎯 Sweep target set at {self.sweep_target:.2f} from previous 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
+
             # Log completed 1m candle
             if self.logger:
                 candle_type = self.get_candle_type(self.current_1min_candle)
@@ -167,6 +168,8 @@ class CandleData:
                 self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
                 self.logger.info(f"   Type: {candle_type}")
                 self.logger.info(f"   --------------------------------------------------")
+        
+
         
         # Set new current candle
         self.current_1min_candle = candle
@@ -192,7 +195,7 @@ class CandleData:
         
         # Check if we need to start a new 5-minute candle
         if not self.current_5min_candle or not safe_datetime_compare(self.current_5min_candle.timestamp, candle_start_time, "eq"):
-            # Save previous 5-minute candle if it exists
+            # Save previous 5-minute candle if it exists ( This would always be the case after initial setup)
             if self.current_5min_candle:
                 self.five_min_candles.append(self.current_5min_candle)
                 self._classify_and_analyze_5min_candle(self.current_5min_candle)
@@ -434,7 +437,7 @@ class CandleData:
         
         return None
     
-    def detect_cisd(self, target_ratio: float = 2.0) -> Optional[Dict]:
+    def detect_cisd(self, target_ratio: float = 4.0) -> Optional[Dict]:
         """
         Detect CISD (current close passing the open of the earliest candle in the
         most recent consecutive bear run), with a fallback using the deepest-sweep candle.

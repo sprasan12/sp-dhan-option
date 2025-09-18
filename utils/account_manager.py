@@ -16,6 +16,13 @@ class AccountManager:
         self.current_balance = config.account_start_balance
         self.fixed_sl_amount = config.get_fixed_sl_amount()
         
+        # Session tracking
+        self.starting_balance = config.account_start_balance
+        self.session_pnl = 0.0
+        self.trades_count = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        
         self.logger.info(f"💰 Account Manager Initialized")
         self.logger.info(f"   Starting Balance: ₹{self.current_balance:,.2f}")
         self.logger.info(f"   Fixed SL Amount: ₹{self.fixed_sl_amount:,.2f}")
@@ -30,6 +37,15 @@ class AccountManager:
         """Update account balance after trade"""
         old_balance = self.current_balance
         self.current_balance += pnl
+        
+        # Update session tracking
+        self.session_pnl += pnl
+        self.trades_count += 1
+        if pnl > 0:
+            self.winning_trades += 1
+        elif pnl < 0:
+            self.losing_trades += 1
+        
         self.logger.info(f"💰 Balance Updated: ₹{old_balance:,.2f} → ₹{self.current_balance:,.2f} (P&L: ₹{pnl:,.2f})")
     
     def calculate_trade_parameters(self, market_price: float, stop_loss_price: float) -> Tuple[bool, int, float, float]:
@@ -162,3 +178,40 @@ class AccountManager:
         
         # Add back investment amount plus P&L
         self.add_investment_return(total_investment, pnl)
+    
+    def get_session_summary(self) -> dict:
+        """Get comprehensive session summary"""
+        win_rate = (self.winning_trades / self.trades_count * 100) if self.trades_count > 0 else 0
+        return {
+            'starting_balance': self.starting_balance,
+            'current_balance': self.current_balance,
+            'session_pnl': self.session_pnl,
+            'trades_count': self.trades_count,
+            'winning_trades': self.winning_trades,
+            'losing_trades': self.losing_trades,
+            'win_rate': win_rate
+        }
+    
+    def log_session_summary(self):
+        """Log comprehensive session summary"""
+        summary = self.get_session_summary()
+        
+        self.logger.info("=" * 60)
+        self.logger.info("📊 SESSION SUMMARY")
+        self.logger.info("=" * 60)
+        self.logger.info(f"💰 Starting Balance: ₹{summary['starting_balance']:,.2f}")
+        self.logger.info(f"💰 Current Balance: ₹{summary['current_balance']:,.2f}")
+        self.logger.info(f"📈 Session P&L: ₹{summary['session_pnl']:,.2f}")
+        self.logger.info(f"📊 Total Trades: {summary['trades_count']}")
+        self.logger.info(f"✅ Winning Trades: {summary['winning_trades']}")
+        self.logger.info(f"❌ Losing Trades: {summary['losing_trades']}")
+        self.logger.info(f"🎯 Win Rate: {summary['win_rate']:.1f}%")
+        
+        if summary['session_pnl'] > 0:
+            self.logger.info(f"🎉 PROFITABLE SESSION! +₹{summary['session_pnl']:,.2f}")
+        elif summary['session_pnl'] < 0:
+            self.logger.info(f"📉 LOSS SESSION: ₹{summary['session_pnl']:,.2f}")
+        else:
+            self.logger.info("⚖️ BREAKEVEN SESSION")
+        
+        self.logger.info("=" * 60)

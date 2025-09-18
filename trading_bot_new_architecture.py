@@ -95,6 +95,9 @@ class NewArchitectureTradingBot:
             exit_callback=self._on_strategy_trade_exit
         )
         
+        # Connect position manager to strategy manager for trailing stops
+        self.strategy_manager.position_manager = self.position_manager
+        
 
         
         # Signal handlers
@@ -452,6 +455,10 @@ class NewArchitectureTradingBot:
                 price = ticker_data['last_price']
                 timestamp = ticker_data['timestamp']
                 
+                # Update broker with current price for shutdown scenarios
+                if hasattr(self.broker, 'update_current_price'):
+                    self.broker.update_current_price(price)
+                
                 # Update strategy manager with new price
                 trade_trigger = self.strategy_manager.candle_data.update_1min_candle(price, timestamp)
                 if trade_trigger:
@@ -474,7 +481,11 @@ class NewArchitectureTradingBot:
             # Log demo data reception
             self.logger.info(f"📡 DEMO DATA RECEIVED")
             self.logger.info(f"   Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-            self.logger.info(f"   OHLC: O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
+            self.logger.info(f"   1 min TF OHLC: O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
+            
+            # Update broker with current price for shutdown scenarios
+            if hasattr(self.broker, 'update_current_price'):
+                self.broker.update_current_price(candle_data['close'])
             
             # Process candle through strategy manager
             self.strategy_manager.candle_data.update_1min_candle_with_data(candle_data, timestamp)
@@ -488,7 +499,6 @@ class NewArchitectureTradingBot:
                         exit_price=trade_trigger['exit_price'],
                         exit_reason=trade_trigger['reason']
                     )
-                    self.strategy_manager.candle_data.detect_cisd()
                 else:
                     self.logger.info(f"🎯 Trade triggered from demo data: {trade_trigger.get('strategy_name', 'Unknown')}")
             
@@ -577,6 +587,12 @@ class NewArchitectureTradingBot:
             self.current_stop_loss = None
             self.current_target = None
 
+            for strategy_info in self.strategy_manager.strategies:
+                strategy = strategy_info['strategy']
+                strategy.in_trade = False
+
+
+
             self.strategy_manager.candle_data.sweep_target = None
             self.strategy_manager.candle_data.sweep_set_time = None
             self.strategy_manager.candle_data.target_swept = False
@@ -585,37 +601,65 @@ class NewArchitectureTradingBot:
             self.strategy_manager.candle_data.count_five_min_close_below_sweep = 0
     
     def _close_all_positions(self):
-        """Close all open positions"""
+        """Close all open positions at current market price"""
         try:
-            positions = self.broker.get_positions()
-            for symbol, position in positions.items():
-                if position['quantity'] != 0:
-                    self.logger.info(f"Closing position for {symbol}")
-                    self.position_manager.close_position(symbol)
+            self.logger.info("🔄 SHUTDOWN: Closing all open positions...")
+            
+            # Use enhanced position manager to close all positions with P&L calculation
+            closed_positions, total_pnl = self.position_manager.close_all_positions(self.account_manager)
+            
+            if closed_positions:
+                self.logger.info(f"✅ SHUTDOWN: Closed {len(closed_positions)} positions")
+                for pos in closed_positions:
+                    self.logger.info(f"   {pos['symbol']}: Entry {pos['entry_price']:.2f} → Exit {pos['exit_price']:.2f} (P&L: ₹{pos['pnl']:.2f})")
+                
+                if total_pnl != 0:
+                    self.logger.info(f"💰 SHUTDOWN: Total P&L from forced closure: ₹{total_pnl:.2f}")
+            else:
+                self.logger.info("ℹ️ SHUTDOWN: No open positions to close")
+                
         except Exception as e:
-            self.logger.error(f"Error closing positions: {e}")
+            self.logger.error(f"❌ SHUTDOWN: Error closing positions: {e}")
     
     def stop(self):
-        """Stop the trading bot gracefully"""
-        self.logger.info("Stopping trading bot...")
+        """Stop the trading bot gracefully with comprehensive shutdown"""
+        self.logger.info("🛑 SHUTDOWN: Stopping trading bot...")
         
-        # Close WebSocket
-        if self.websocket:
-            self.websocket.close()
-        
-        # Stop demo client
-        if self.demo_client:
-            self.demo_client.stop_data_stream()
-            self.demo_client.stop_simulation()
-        
-        # Stop demo server
-        if self.demo_server:
-            self.demo_server.stop_simulation()
-        
-        # Close all positions
-        self._close_all_positions()
-        
-        self.logger.info("Trading bot stopped")
+        try:
+            # Step 1: Close all open positions at current market price
+            self._close_all_positions()
+            
+            # Step 2: Log comprehensive session summary
+            self.logger.info("📊 SHUTDOWN: Generating session summary...")
+            self.account_manager.log_session_summary()
+            
+            # Step 3: Stop all services
+            self.logger.info("🔄 SHUTDOWN: Stopping services...")
+            
+            # Close WebSocket
+            if self.websocket:
+                self.websocket.close()
+                self.logger.info("   ✅ WebSocket closed")
+            
+            # Stop demo client
+            if self.demo_client:
+                self.demo_client.stop_data_stream()
+                self.demo_client.stop_simulation()
+                self.logger.info("   ✅ Demo client stopped")
+            
+            # Stop demo server
+            if self.demo_server:
+                self.demo_server.stop_simulation()
+                self.logger.info("   ✅ Demo server stopped")
+            
+            self.logger.info("✅ SHUTDOWN: Trading bot stopped successfully")
+            
+        except Exception as e:
+            self.logger.error(f"❌ SHUTDOWN: Error during shutdown: {e}")
+            import traceback
+            self.logger.error(f"❌ SHUTDOWN: Traceback: {traceback.format_exc()}")
+        finally:
+            self.logger.info("🏁 SHUTDOWN: Process completed")
 
 def main():
     """Main entry point"""

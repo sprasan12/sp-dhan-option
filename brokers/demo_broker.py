@@ -28,6 +28,9 @@ class DemoBroker:
         # Order tracking
         self.order_id_counter = 0
         
+        # Store current market price for shutdown scenarios
+        self.current_market_price = None
+        
         print(f"Demo Broker initialized with virtual balance: ₹{self.virtual_balance:,.2f}")
     
     def get_security_id(self, symbol: str, instruments_df=None):
@@ -41,6 +44,24 @@ class DemoBroker:
         if self.account_manager:
             return self.account_manager.get_current_balance()
         return self.virtual_balance
+    
+    def get_current_price(self, symbol: str) -> float:
+        """Get current market price for a symbol"""
+        # Return stored current price if available
+        if self.current_market_price:
+            return self.current_market_price
+        
+        # Fallback: try to get from positions
+        if symbol in self.positions:
+            position = self.positions[symbol]
+            return position.get('average_price', position.get('price', 0))
+        
+        # Final fallback
+        return 0.0
+    
+    def update_current_price(self, price: float):
+        """Update current market price (called from market data feed)"""
+        self.current_market_price = price
     
     def place_order(self, symbol: str, quantity: int, order_type: str = "MARKET", 
                    side: str = "BUY", price: float = 0, target_price: float = None, 
@@ -71,11 +92,22 @@ class DemoBroker:
             
             # Simulate order execution (immediate fill for demo)
             if order_type == "MARKET":
-                # For demo, we'll use a placeholder price
-                # In real implementation, this would come from current market price
-                order["filledPrice"] = order["price"] if order["price"] > 0 else 100.0
+                # Use current market price if available, otherwise use provided price or fallback
+                if self.current_market_price:
+                    order["filledPrice"] = self.current_market_price
+                elif order["price"] > 0:
+                    order["filledPrice"] = order["price"]
+                else:
+                    order["filledPrice"] = 100.0  # Fallback
+                    
                 order["filledQuantity"] = quantity
                 order["status"] = "FILLED"
+                
+                print(f"🔍 DEMO ORDER FILL DEBUG:")
+                print(f"   Order Price: {order['price']}")
+                print(f"   Filled Price: {order['filledPrice']}")
+                print(f"   Quantity: {quantity}")
+                print(f"   Side: {side}")
                 
                 # Note: Account balance is managed by AccountManager, not here
                 # The AccountManager already deducted the investment when the trade was approved
@@ -173,6 +205,17 @@ class DemoBroker:
                 order["targetPrice"] = round_to_tick(new_target, self.tick_size)
                 print(f"Demo Order Modified: {order_id} - New Target: {new_target}")
                 return {"status": "SUCCESS", "message": "Target modified successfully"}
+        
+        return {"status": "FAILED", "message": "Order not found"}
+
+    def modify_stop_loss(self, order_id: str, stop_loss_price: float) -> Dict:
+        """Modify stop loss price for an existing order (demo)."""
+        # Find the order
+        for order in self.order_history:
+            if order["orderId"] == order_id:
+                order["stopLossPrice"] = round_to_tick(stop_loss_price, self.tick_size)
+                print(f"Demo Order Modified: {order_id} - New Stop Loss: {stop_loss_price}")
+                return {"status": "SUCCESS", "message": "Stop loss modified successfully"}
         
         return {"status": "FAILED", "message": "Order not found"}
     

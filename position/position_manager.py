@@ -20,6 +20,7 @@ class PositionManager:
         self.current_position = None
         self.active_orders = {}  # Track all active orders
         self.last_order_time = None  # Track last order placement time
+        self.current_symbol = None  # Track current trading symbol
         
         # Risk management parameters
         self.initial_risk_reward = 1.0  # default 1:1
@@ -95,6 +96,9 @@ class PositionManager:
             return False
         
         try:
+            # Store current symbol
+            self.current_symbol = symbol
+            
             # Calculate entry, stop loss, and take profit with price rounding
             entry_price = round_to_tick(trigger['entry'], self.tick_size)
             stop_loss = round_to_tick(trigger['stop_loss'], self.tick_size)
@@ -334,25 +338,40 @@ class PositionManager:
         print(f"✅ Position manager state reset. Active Orders: {len(self.active_orders)}")
         return True
     
-    def close_position(self, symbol):
-        """Close a specific position by symbol"""
+    def close_position(self, symbol, current_price=None):
+        """Close a specific position by symbol at current market price"""
         try:
             # Get current positions
             positions = self.broker.get_positions()
             
             if symbol not in positions:
                 print(f"No position found for symbol: {symbol}")
-                return False
+                return False, None, None
             
             position = positions[symbol]
             quantity = position['quantity']
             
             if quantity == 0:
                 print(f"No quantity to close for symbol: {symbol}")
-                return False
+                return False, None, None
+            
+            # Get current market price if not provided
+            if current_price is None:
+                try:
+                    # Try to get current price from broker
+                    if hasattr(self.broker, 'get_current_price'):
+                        current_price = self.broker.get_current_price(symbol)
+                    else:
+                        # Fallback to position average price
+                        current_price = position.get('average_price', position.get('price', 0))
+                        print(f"⚠️ Using position average price as current price: {current_price}")
+                except Exception as e:
+                    print(f"⚠️ Could not get current price: {e}")
+                    current_price = position.get('average_price', position.get('price', 0))
             
             # Debug: Print position structure
             print(f"DEBUG: Position structure for {symbol}: {position}")
+            print(f"Current market price: {current_price}")
             
             # Determine side (BUY to close SELL position, SELL to close BUY position)
             position_side = position.get('side', 'LONG')
@@ -370,7 +389,7 @@ class PositionManager:
                     side = "BUY"   # Close short position
                 print(f"⚠️ Unknown position side '{position_side}', inferred side: {side}")
             
-            print(f"Closing position: {symbol} - {quantity} qty @ {side}")
+            print(f"Closing position: {symbol} - {quantity} qty @ {side} (Market Price: {current_price})")
             
             # Place closing order
             order_result = self.broker.place_order(
@@ -383,14 +402,153 @@ class PositionManager:
             
             if order_result:
                 print(f"✅ Position close order placed successfully: {symbol}")
-                return True
+                return True, current_price, abs(quantity)
             else:
                 print(f"❌ Failed to place position close order: {symbol}")
-                return False
+                return False, None, None
                 
         except Exception as e:
             print(f"Error closing position {symbol}: {e}")
-            return False
+            return False, None, None
+    
+    def close_all_positions(self, account_manager=None):
+        """Close all open positions and calculate P&L"""
+        try:
+            closed_positions = []
+            total_pnl = 0.0
+            
+            print(f"🔄 Closing all positions...")
+            
+            # First, check if we have a current position in position manager
+            if self.current_position and self.is_trading:
+                print(f"📊 Found current position in position manager:")
+                print(f"   Symbol: {self.current_symbol or 'Unknown'}")
+                print(f"   Entry Price: {self.current_position.get('entry_price', 'Unknown')}")
+                print(f"   Quantity: {self.current_position.get('quantity', 'Unknown')}")
+                print(f"   Lots: {self.current_position.get('lots', 'Unknown')}")
+                
+                # Use position manager's current position data
+                symbol = self.current_symbol or 'Unknown'
+                entry_price = self.current_position.get('entry_price', 0)
+                quantity = self.current_position.get('quantity', 0)
+                lots = self.current_position.get('lots', 0)
+                
+                if quantity > 0:
+                    print(f"📊 Closing current position: {symbol} - {quantity} qty")
+                    
+                    # Close the position
+                    success, exit_price, closed_qty = self.close_position(symbol)
+                    
+                    if success and exit_price and closed_qty:
+                        # Calculate P&L using position manager data
+                        if account_manager:
+                            # Determine if it's a buy or sell trade
+                            is_buy = True  # Assuming buy trades for now
+                            
+                            print(f"🔍 P&L Calculation Debug:")
+                            print(f"   Entry Price: {entry_price}")
+                            print(f"   Exit Price: {exit_price}")
+                            print(f"   Closed Qty: {closed_qty}")
+                            print(f"   Lot Size: {account_manager.config.lot_size}")
+                            print(f"   Calculated Lots: {lots}")
+                            print(f"   Is Buy: {is_buy}")
+                            
+                            pnl = account_manager.calculate_pnl(
+                                entry_price=entry_price,
+                                exit_price=exit_price,
+                                lots=lots,
+                                is_buy=is_buy
+                            )
+                            
+                            print(f"   Calculated P&L: {pnl}")
+                            total_pnl += pnl
+                            
+                            print(f"💰 Position P&L: ₹{pnl:.2f} (Entry: {entry_price:.2f} → Exit: {exit_price:.2f})")
+                        
+                        closed_positions.append({
+                            'symbol': symbol,
+                            'entry_price': entry_price,
+                            'exit_price': exit_price,
+                            'quantity': closed_qty,
+                            'pnl': pnl if account_manager else 0
+                        })
+                    else:
+                        print(f"❌ Failed to close position: {symbol}")
+            else:
+                # Fallback to broker positions if no current position
+                print(f"ℹ️ No current position in position manager, checking broker positions...")
+                positions = self.broker.get_positions()
+                
+                for symbol, position in positions.items():
+                    quantity = position.get('quantity', 0)
+                    if quantity != 0:
+                        print(f"📊 Found open position: {symbol} - {quantity} qty")
+                        
+                        # Get entry price for P&L calculation
+                        # Try multiple field names for compatibility
+                        entry_price = (position.get('average_price') or 
+                                     position.get('avgPrice') or 
+                                     position.get('price') or 
+                                     position.get('avg_price') or 0)
+                        
+                        print(f"🔍 Position fields: {list(position.keys())}")
+                        print(f"🔍 Entry price lookup: average_price={position.get('average_price')}, avgPrice={position.get('avgPrice')}, price={position.get('price')}, avg_price={position.get('avg_price')}")
+                        print(f"🔍 Final entry price: {entry_price}")
+                        
+                        # Close the position
+                        success, exit_price, closed_qty = self.close_position(symbol)
+                        
+                        if success and exit_price and closed_qty:
+                            # Calculate P&L
+                            if account_manager:
+                                # Determine if it's a buy or sell trade
+                                position_side = position.get('side', 'LONG')
+                                is_buy = position_side in ['BUY', 'LONG'] or quantity > 0
+                                
+                                lots = closed_qty // account_manager.config.lot_size
+                                print(f"🔍 P&L Calculation Debug:")
+                                print(f"   Entry Price: {entry_price}")
+                                print(f"   Exit Price: {exit_price}")
+                                print(f"   Closed Qty: {closed_qty}")
+                                print(f"   Lot Size: {account_manager.config.lot_size}")
+                                print(f"   Calculated Lots: {lots}")
+                                print(f"   Is Buy: {is_buy}")
+                                
+                                pnl = account_manager.calculate_pnl(
+                                    entry_price=entry_price,
+                                    exit_price=exit_price,
+                                    lots=lots,
+                                    is_buy=is_buy
+                                )
+                                
+                                print(f"   Calculated P&L: {pnl}")
+                                total_pnl += pnl
+                                
+                                print(f"💰 Position P&L: ₹{pnl:.2f} (Entry: {entry_price:.2f} → Exit: {exit_price:.2f})")
+                            
+                            closed_positions.append({
+                                'symbol': symbol,
+                                'entry_price': entry_price,
+                                'exit_price': exit_price,
+                                'quantity': closed_qty,
+                                'pnl': pnl if account_manager else 0
+                            })
+                        else:
+                            print(f"❌ Failed to close position: {symbol}")
+            
+            if closed_positions:
+                print(f"✅ Closed {len(closed_positions)} positions")
+                if account_manager:
+                    print(f"💰 Total P&L from forced closure: ₹{total_pnl:.2f}")
+                    account_manager.update_balance(total_pnl)
+            else:
+                print("ℹ️ No open positions to close")
+            
+            return closed_positions, total_pnl
+            
+        except Exception as e:
+            print(f"Error closing all positions: {e}")
+            return [], 0.0
     
     def display_order_status(self):
         """Display current order status for monitoring"""

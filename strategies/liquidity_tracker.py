@@ -49,6 +49,7 @@ class LiquidityTracker:
         self.swing_look_back = 1
         # Candle storage - only 5m and 1m
         self.lt_five_min_candles = deque(maxlen=30000)  # Store 5-minute candles
+        self.lt_one_min_candles = deque(maxlen=1500)  # Store 1-minute candles for swing low detection
         
         # Sorted price lists for efficient lookup
         self._bullish_fvg_prices = []
@@ -540,7 +541,12 @@ class LiquidityTracker:
                     self.logger.info(f"      IFVGs: {summary['bullish_ifvgs']} Bullish, {summary['bearish_ifvgs']} Bearish")
                 self.logger.info(f"      Previous Highs: {summary['previous_highs']}, Previous Lows: {summary['previous_lows']}")
                 self.logger.info(f"   ✅ 5-minute candle processing completed")
-        # Only 5min timeframe is supported now
+        elif timeframe == '1min':
+            if candle not in self.lt_one_min_candles:
+                self.lt_one_min_candles.append(candle)
+            # Process for 1-minute swing lows
+            self._process_single_candle_for_1min_swing_lows(candle, symbol)
+        # Only 5min and 1min timeframes are supported now
     
     def _process_single_candle_for_fvgs(self, new_candle: Candle, timeframe: str, symbol: str = "Unknown"):
         """
@@ -802,3 +808,57 @@ class LiquidityTracker:
                     self.logger.info(f"   Time: {new_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
                     self.logger.info(f"   Low: {new_candle.low:.2f}")
                     self.logger.info(f"   Symbol: {symbol}")
+    
+    def _process_single_candle_for_1min_swing_lows(self, new_candle: Candle, symbol: str = "Unknown"):
+        """
+        Process a single 1-minute candle for swing low detection
+        
+        Args:
+            new_candle: The new completed 1-minute candle
+            symbol: Symbol name for logging
+        """
+        # Get recent 1-minute candles for swing detection (need at least 3 candles)
+        recent_candles = list(self.lt_one_min_candles)[-5:]  # Get last 5 from deque
+        
+        # Remove duplicates and sort by timestamp
+        recent_candles = list(set(recent_candles))
+        recent_candles.sort(key=lambda x: x.timestamp)
+        
+        # Check if we have enough candles for swing detection (need at least 3)
+        if len(recent_candles) >= 3:
+            # Evaluate the PREVIOUS candle as the swing candidate (middle candle),
+            # since the new candle serves as the 'next' in the three-candle pattern
+            candidate_index = len(recent_candles) - 2
+            
+            # Check if the previous candle is a swing low (lower than previous and next candle)
+            if self._check_1min_swing_low(recent_candles, candidate_index):
+                candidate_candle = recent_candles[candidate_index]
+                zone = LiquidityZone(
+                    zone_type="swing_low_1min",
+                    price_high=candidate_candle.low,
+                    price_low=candidate_candle.low,
+                    timestamp=candidate_candle.timestamp,
+                    candle=candidate_candle,
+                    midpoint=candidate_candle.low,
+                    symbol=symbol
+                )
+                self.swing_lows.append(zone)
+                
+                if self.logger:
+                    self.logger.info(f"📉 1-MIN SWING LOW DETECTED!")
+                    self.logger.info(f"   Time: {candidate_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"   Low: {candidate_candle.low:.2f}")
+                    self.logger.info(f"   Symbol: {symbol}")
+    
+    def _check_1min_swing_low(self, candles: List[Candle], candle_index):
+        """Check if a 1-minute candle at given index is a swing low"""
+        if candle_index < 1 or candle_index >= len(candles) - 1:
+            return False
+        
+        current_candle = candles[candle_index]
+        prev_candle = candles[candle_index - 1]
+        next_candle = candles[candle_index + 1]
+        
+        # A swing low is when the current candle's low is lower than both previous and next candle's low
+        return (current_candle.low < prev_candle.low and 
+                current_candle.low < next_candle.low)
