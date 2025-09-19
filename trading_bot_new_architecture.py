@@ -317,7 +317,9 @@ class NewArchitectureTradingBot:
         
         # Start demo server
         if self.demo_server:
+            self.demo_server.set_callback(self._on_demo_data)
             self.start_demo_server()
+
             self.demo_client.set_callback(self._on_demo_data)
             self.demo_client.start_data_stream()
             self.demo_client.start_simulation()

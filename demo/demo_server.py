@@ -38,6 +38,10 @@ class DemoServer:
         
         # Data callback for external processing
         self.data_callback = None
+
+    def set_callback(self, callback: Callable):
+        """Set callback function for price updates"""
+        self.data_callback = callback
         
     def setup_routes(self):
         """Setup Flask routes"""

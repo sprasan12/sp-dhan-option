@@ -120,10 +120,10 @@ class DemoDataClient:
                         self.current_timestamp = datetime.fromisoformat(candle_data["timestamp"])
                         
                         # Call callback if set
-                        if self.callback:
+                        #if self.callback:
                             # Pass security_id as None for demo mode (not needed for demo)
                             # Pass the complete candle data instead of just the close price
-                            self.callback(candle_data, self.current_timestamp)
+                            #self.callback(candle_data, self.current_timestamp)
                         
                         print(f"Demo Data: {self.current_timestamp.strftime('%H:%M:%S')} - Price: {self.current_price}")
                     else:
