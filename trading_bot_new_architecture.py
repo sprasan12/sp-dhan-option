@@ -45,6 +45,9 @@ class NewArchitectureTradingBot:
         self.websocket = None
         self.demo_server = None
         self.demo_client = None
+        
+        # Demo data deduplication
+        self.last_processed_timestamp = None
 
         # Initialize logger
         self.logger = TradingLogger(
@@ -162,7 +165,7 @@ class NewArchitectureTradingBot:
             reference_date = self.config.get_demo_start_datetime()
             self.logger.info(f"Demo mode: Using {reference_date.strftime('%Y-%m-%d %H:%M:%S')} as reference date")
         else:
-            reference_date = datetime.now()
+            reference_date = datetime.now() - timedelta(minutes=1)
             self.logger.info(f"Live mode: Using current time {reference_date.strftime('%Y-%m-%d %H:%M:%S')} as reference date")
         
         # Fetch historical data
@@ -239,7 +242,7 @@ class NewArchitectureTradingBot:
                 df = historical_data.copy()
                 
                 # Filter data to only include candles from demo start date onwards
-                demo_start_date = self.config.get_demo_start_datetime()
+                demo_start_date = self.config.get_demo_start_datetime_streaming()
                 
                 # Convert demo_start_date to timezone-aware (Asia/Kolkata) for comparison
                 if demo_start_date.tzinfo is None:
@@ -252,67 +255,18 @@ class NewArchitectureTradingBot:
                 if len(df) == 0:
                     self.logger.error(f"No data available from demo start date {demo_start_date}")
                     return
-                
-                # Find the exact 09:15:00 candle to start from
-                demo_start_time = self.config.get_demo_start_datetime()
-                if demo_start_time.tzinfo is None:
-                    import pytz
-                    kolkata_tz = pytz.timezone('Asia/Kolkata')
-                    demo_start_time = kolkata_tz.localize(demo_start_time)
-                
-                # Debug: Show what candles we actually have
-                self.logger.info(f"Available candles in data:")
-                for i in range(min(5, len(df))):
-                    candle_time = df.iloc[i]['timestamp']
-                    self.logger.info(f"  Candle {i}: {candle_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # Find the first candle that starts at or after 09:15:00
-                start_candle_index = None
-                for i, row in df.iterrows():
-                    if row['timestamp'] >= demo_start_time:
-                        start_candle_index = i
-                        break
-                
-                if start_candle_index is None:
-                    self.logger.error(f"No candle found at or after demo start time {demo_start_time}")
-                    return
-                
-                # Slice the dataframe to start from the correct candle
-                df = df.iloc[start_candle_index:].copy()
-                
-                self.logger.info(f"Demo start time: {demo_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.logger.info(f"First candle to stream: {df.iloc[0]['timestamp'].strftime('%Y-%m-%d %H:%M:%S')}")
-                
-                # If the first candle is not exactly 09:15:00, we need to create a synthetic 09:15:00 candle
-                first_candle_time = df.iloc[0]['timestamp']
-                if first_candle_time > demo_start_time:
-                    self.logger.warning(f"⚠️  No 09:15:00 candle found! First available candle is {first_candle_time.strftime('%H:%M:%S')}")
-                    self.logger.warning(f"⚠️  Creating synthetic 09:15:00 candle using first available candle data")
-                    
-                    # Create a synthetic 09:15:00 candle using the first available candle's data
-                    first_candle = df.iloc[0]
-                    synthetic_candle = {
-                        'timestamp': demo_start_time,
-                        'open': first_candle['open'],
-                        'high': first_candle['high'], 
-                        'low': first_candle['low'],
-                        'close': first_candle['close'],
-                        'volume': first_candle.get('volume', 0)
-                    }
-                    
-                    # Insert the synthetic candle at the beginning
-                    df = pd.concat([pd.DataFrame([synthetic_candle]), df], ignore_index=True)
-                    self.logger.info(f"✅ Created synthetic 09:15:00 candle: O:{synthetic_candle['open']:.2f} H:{synthetic_candle['high']:.2f} L:{synthetic_candle['low']:.2f} C:{synthetic_candle['close']:.2f}")
-                
+
+
+
                 self.demo_server = DemoServer(
                     historical_data=df,
-                    start_date=demo_start_time,
+                    start_date=demo_start_date,
                     port=self.config.demo_server_port,
                     stream_interval_seconds=self.config.demo_stream_interval_seconds
                 )
                 
-                # Set data callback to process candles through strategy manager
-                self.demo_server.set_data_callback(self._on_demo_data)
+                # Demo server will stream data, demo client will handle callbacks
+                # self.demo_server.set_data_callback(self._on_demo_data)  # Removed to prevent duplicate processing
                 
                 # Initialize demo client
                 self.demo_client = DemoDataClient(f"http://localhost:{self.config.demo_server_port}")
@@ -324,7 +278,7 @@ class NewArchitectureTradingBot:
                     end_date = df.iloc[-1]['timestamp']
                     self.logger.info(f"Demo streaming date range: {start_date.date()} to {end_date.date()}")
                     # Log the configured demo start time, not the first available candle
-                    self.logger.info(f"Demo start time: {demo_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(f"Demo start time: {demo_start_date.strftime('%Y-%m-%d %H:%M:%S')}")
                 else:
                     self.logger.error("Warning: Could not fetch historical data for demo trading")
                     
@@ -459,8 +413,12 @@ class NewArchitectureTradingBot:
                 if hasattr(self.broker, 'update_current_price'):
                     self.broker.update_current_price(price)
                 
-                # Update strategy manager with new price
-                trade_trigger = self.strategy_manager.candle_data.update_1min_candle(price, timestamp)
+              # Process candle through strategy manager
+                candle = self.strategy_manager.candle_data.update_1min_candle(price, timestamp)
+                trade_trigger = None
+                if candle:
+                    trade_trigger = self.strategy_manager.update_1min_candle(candle, timestamp)
+
                 if trade_trigger:
                     if trade_trigger.get('type') == 'EXIT':
                         self.logger.info(f"🚪 Trade exit triggered: {trade_trigger['reason']}")
@@ -478,6 +436,13 @@ class NewArchitectureTradingBot:
     def _on_demo_data(self, candle_data, timestamp):
         """Handle demo data updates"""
         try:
+            # Deduplication: Skip if we've already processed this timestamp
+            if self.last_processed_timestamp and timestamp <= self.last_processed_timestamp:
+                return
+            
+            # Update last processed timestamp
+            self.last_processed_timestamp = timestamp
+            
             # Log demo data reception
             self.logger.info(f"📡 DEMO DATA RECEIVED")
             self.logger.info(f"   Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
@@ -599,6 +564,9 @@ class NewArchitectureTradingBot:
             self.strategy_manager.candle_data.sweep_target_invalidated = False
             self.strategy_manager.candle_data.two_CR_valid = True
             self.strategy_manager.candle_data.count_five_min_close_below_sweep = 0
+            self.strategy_manager.candle_data.last_sweep_candle_time = None
+            self.strategy_manager.candle_data.last_consecutive_bear_candles.clear()
+            self.strategy_manager.candle_data.deepest_sweep_candle = None
     
     def _close_all_positions(self):
         """Close all open positions at current market price"""

@@ -5,7 +5,7 @@ Clean, simple configuration for single symbol trading
 
 import os
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -95,7 +95,20 @@ class TradingConfig:
         """Get demo start datetime with market hours"""
         base_datetime = datetime.strptime(self.demo_start_date, '%Y-%m-%d')
         # Set to 9:15 AM (market open)
-        return base_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
+        # Set to 15:29 PM of the last trading day before base_datetime (skip weekends)
+        last_trading_day = base_datetime
+        while last_trading_day.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
+            last_trading_day = last_trading_day - timedelta(days=1)
+        last_trading_day = last_trading_day - timedelta(days=1)
+        while last_trading_day.weekday() >= 5:
+            last_trading_day = last_trading_day - timedelta(days=1)
+        return last_trading_day.replace(hour=15, minute=30, second=0, microsecond=0)
+        #return base_datetime.replace(hour=9, minute=14, second=0, microsecond=0)
+
+    def get_demo_start_datetime_streaming(self):
+        """Get demo start datetime with market hours"""
+        base_datetime = datetime.strptime(self.demo_start_date, '%Y-%m-%d')
+        return base_datetime.replace(hour=9, minute=14, second=0, microsecond=0)
     
     def get_num_hist_days(self):
         """Get number of historical data days"""

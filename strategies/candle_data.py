@@ -91,41 +91,88 @@ class CandleData:
             timestamp_match = safe_datetime_compare(self.current_1min_candle.timestamp, candle_start_time, "eq")
 
         if not self.current_1min_candle or not timestamp_match:
+            completed_candle = None
             if self.current_1min_candle:
-                self.one_min_candles.append(self.current_1min_candle)
                 self.last_1min_candle_time = timestamp
-                if self.logger:
-                    self.logger.log_1min_candle_completion(self.current_1min_candle)
-                else:
-                    print(
-                        f"📊 1-Min Candle Completed: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')} - O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
-
-                # Update 5-minute candle
+                # Update 5-minute candle based on the candle that just completed
                 self._update_5min_candle(self.current_1min_candle.close, timestamp)
+                # Persist the completed 1m candle and run analysis on it
+                self.one_min_candles.append(self.current_1min_candle)
+                self._classify_and_analyze_1min_candle(self.current_1min_candle)
+                completed_candle = self.current_1min_candle
+                if self.sweep_target is None:
+                    # check last 5 min candle, if BEAR/Neutral, then last 5min low as sweep target
+                    prev_5min_candle = self.five_min_candles[-1] if self.five_min_candles else None
+                    if self.logger:
+                        self.logger.info(f"🔍 SWEEP TARGET CHECK:")
+                        self.logger.info(f"   Current sweep target: {self.sweep_target}")
+                        self.logger.info(f"   Previous 5m candle: {'EXISTS' if prev_5min_candle else 'NONE'}")
+                        if prev_5min_candle:
+                            self.logger.info(f"   Prev 5m candle time: {prev_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                            self.logger.info(f"   Prev 5m candle OHLC: O:{prev_5min_candle.open:.2f} H:{prev_5min_candle.high:.2f} L:{prev_5min_candle.low:.2f} C:{prev_5min_candle.close:.2f}")
+                    
+                    if prev_5min_candle:
+                        candle_type = self.get_candle_type(prev_5min_candle)
+                        if self.logger:
+                            self.logger.info(f"   Prev 5m candle type: {candle_type}")
+                        
+                        if candle_type in ["BEAR", "NEUTRAL"]:
+                            self.sweep_target = prev_5min_candle.low
+                            self.sweep_set_time = self.current_1min_candle.timestamp
+                            self.target_swept = False
+                            self.sweep_target_invalidated = False
+                            self.two_CR_valid = True
+                            self.count_five_min_close_below_sweep = 0
+                            if self.logger:
+                                self.logger.info(f"🎯 SWEEP TARGET SET!")
+                                self.logger.info(f"   Target Price: {self.sweep_target:.2f}")
+                                self.logger.info(f"   Set Time: {self.sweep_set_time.strftime('%H:%M:%S')}")
+                                self.logger.info(f"   From 5m Candle: {candle_type} at {prev_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                                self.logger.info(f"   Target Swept: {self.target_swept}")
+                                self.logger.info(f"   Two CR Valid: {self.two_CR_valid}")
+                        else:
+                            if self.logger:
+                                self.logger.info(f"ℹ️ SWEEP TARGET: Not set - prev 5m candle is {candle_type} (need BEAR/NEUTRAL)")
+                    else:
+                        if self.logger:
+                            self.logger.info(f"ℹ️ SWEEP TARGET: Not set - no previous 5m candle available")
+
+                # Log completed 1m candle
+                if self.logger:
+                    candle_type = self.get_candle_type(self.current_1min_candle)
+                    candle_symbol = self.get_candle_symbol(self.current_1min_candle)
+                    body_size = self.current_1min_candle.body_size()
+                    total_range = self.current_1min_candle.high - self.current_1min_candle.low
+                    body_percentage = (body_size / total_range * 100) if total_range > 0 else 0
+
+                    self.logger.info(f"📊 1-MINUTE CANDLE COMPLETED")
+                    self.logger.info(f"   Time: {self.current_1min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                    self.logger.info(
+                        f"   OHLC: O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
+                    self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
+                    self.logger.info(f"   Type: {candle_type}")
+                    self.logger.info(f"   --------------------------------------------------")
 
 
-            # Create new 1-minute candle
+            # Create new 1-minute candle for the next period
             self.current_1min_candle = Candle(candle_start_time, price, price, price, price)
             if self.logger:
                 self.logger.info(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
             else:
                 print(f"🕯️ New 1min candle at {candle_start_time.strftime('%H:%M:%S')} - O:{price:.2f}")
             self.last_1min_candle_time = candle_start_time
+            # Return the completed candle (if any). Strategies should run only on completed candles
+            return completed_candle
         else:
             # Update existing 1-minute candle
             self.current_1min_candle.update_price(price)
-
+        return None
     
     def update_1min_candle_with_data(self, candle_data, timestamp):
         """Update 1-minute candle with complete OHLC data and process through strategy manager"""
         timestamp = ensure_timezone_naive(timestamp)
         
-        # Log incoming 1m candle data
-        if self.logger:
-            self.logger.info(f"📥 1-MINUTE CANDLE FORMED")
-            self.logger.info(f"   Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-            self.logger.info(f"   OHLC: O:{candle_data['open']:.2f} H:{candle_data['high']:.2f} L:{candle_data['low']:.2f} C:{candle_data['close']:.2f}")
-        
+
         # Create new 1-minute candle
         candle = Candle(
             timestamp=timestamp,
@@ -134,52 +181,119 @@ class CandleData:
             low=candle_data['low'],
             close=candle_data['close']
         )
-        
-        # Save previous candle if it exists (this would always be the case)
-        if self.current_1min_candle:
-            self.one_min_candles.append(self.current_1min_candle)
-            self._classify_and_analyze_1min_candle(self.current_1min_candle)
-            if self.sweep_target is None:
-                #check last 5 min candle, if BEAR/Neutral, then last 5min low as sweep target
-                prev_5min_candle = self.five_min_candles[-1] if self.five_min_candles else None
-                if prev_5min_candle:
-                    candle_type = self.get_candle_type(prev_5min_candle)
-                    if candle_type in ["BEAR", "NEUTRAL"]:
-                        self.sweep_target = prev_5min_candle.low
-                        self.sweep_set_time = self.current_1min_candle.timestamp
-                        self.target_swept = False
-                        self.sweep_target_invalidated = False
-                        self.two_CR_valid = True
-                        self.count_five_min_close_below_sweep = 0
-                        if self.logger:
-                            self.logger.info(f"🎯 Sweep target set at {self.sweep_target:.2f} from previous 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
-
-            # Log completed 1m candle
-            if self.logger:
-                candle_type = self.get_candle_type(self.current_1min_candle)
-                candle_symbol = self.get_candle_symbol(self.current_1min_candle)
-                body_size = self.current_1min_candle.body_size()
-                total_range = self.current_1min_candle.high - self.current_1min_candle.low
-                body_percentage = (body_size / total_range * 100) if total_range > 0 else 0
-                
-                self.logger.info(f"📊 1-MINUTE CANDLE COMPLETED")
-                self.logger.info(f"   Time: {self.current_1min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.logger.info(f"   OHLC: O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
-                self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
-                self.logger.info(f"   Type: {candle_type}")
-                self.logger.info(f"   --------------------------------------------------")
-        
-
-        
         # Set new current candle
         self.current_1min_candle = candle
         self.last_1min_candle_time = timestamp
-        
+        # Log completed 1m candle
+        self._log_1m_completion()
+
+        self.one_min_candles.append(self.current_1min_candle)
+        self._classify_and_analyze_1min_candle(self.current_1min_candle)
+        if self.sweep_target is None:
+            #check last 5 min candle, if BEAR/Neutral, then last 5min low as sweep target
+            prev_5min_candle = self.five_min_candles[-1] if self.five_min_candles else None
+            if self.logger:
+                self.logger.info(f"🔍 SWEEP TARGET CHECK (1m candle completion):")
+                self.logger.info(f"   Current sweep target: {self.sweep_target}")
+                self.logger.info(f"   Previous 5m candle: {'EXISTS' if prev_5min_candle else 'NONE'}")
+                if prev_5min_candle:
+                    self.logger.info(f"   Prev 5m candle time: {prev_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                    self.logger.info(f"   Prev 5m candle OHLC: O:{prev_5min_candle.open:.2f} H:{prev_5min_candle.high:.2f} L:{prev_5min_candle.low:.2f} C:{prev_5min_candle.close:.2f}")
+
+            if prev_5min_candle:
+                candle_type = self.get_candle_type(prev_5min_candle)
+                if self.logger:
+                    self.logger.info(f"   Prev 5m candle type: {candle_type}")
+
+                if candle_type in ["BEAR", "NEUTRAL"]:
+                    self.sweep_target = prev_5min_candle.low
+                    self.sweep_set_time = self.current_1min_candle.timestamp
+                    self.target_swept = False
+                    self.sweep_target_invalidated = False
+                    self.two_CR_valid = True
+                    self.count_five_min_close_below_sweep = 0
+                    if self.logger:
+                        self.logger.info(f"🎯 SWEEP TARGET SET (1m completion)!")
+                        self.logger.info(f"   Target Price: {self.sweep_target:.2f}")
+                        self.logger.info(f"   Set Time: {self.sweep_set_time.strftime('%H:%M:%S')}")
+                        self.logger.info(f"   From 5m Candle: {candle_type} at {prev_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                        self.logger.info(f"   Target Swept: {self.target_swept}")
+                        self.logger.info(f"   Two CR Valid: {self.two_CR_valid}")
+                else:
+                    if self.logger:
+                        self.logger.info(f"ℹ️ SWEEP TARGET: Not set - prev 5m candle is {candle_type} (need BEAR/NEUTRAL)")
+            else:
+                if self.logger:
+                    self.logger.info(f"ℹ️ SWEEP TARGET: Not set - no previous 5m candle available")
+
+
         # Update 5-minute candle
         self._update_5min_candle(candle_data['close'], timestamp)
 
         return None
-    
+
+    def _log_1m_completion(self):
+        # Log completed 1m candle
+        if self.logger:
+            candle_type = self.get_candle_type(self.current_1min_candle)
+            candle_symbol = self.get_candle_symbol(self.current_1min_candle)
+            body_size = self.current_1min_candle.body_size()
+            total_range = self.current_1min_candle.high - self.current_1min_candle.low
+            body_percentage = (body_size / total_range * 100) if total_range > 0 else 0
+
+            self.logger.info(f"📊 1-MINUTE CANDLE COMPLETED")
+            self.logger.info(f"   Time: {self.current_1min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(
+                f"   OHLC: O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
+            self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
+            self.logger.info(f"   Type: {candle_type}")
+            self.logger.info(f"   --------------------------------------------------")
+
+    def _log_5m_completion(self):
+        # Log completed 5m candle
+        if self.logger:
+            candle_type = self.get_candle_type(self.current_5min_candle)
+            candle_symbol = self.get_candle_symbol(self.current_5min_candle)
+            body_size = self.current_5min_candle.body_size()
+            total_range = self.current_5min_candle.high - self.current_5min_candle.low
+            body_percentage = (body_size / total_range * 100) if total_range > 0 else 0
+
+            self.logger.info(f"🕯️ 5-MINUTE CANDLE COMPLETED")
+            self.logger.info(f"   Time: {self.current_5min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(
+                f"   OHLC: O:{self.current_5min_candle.open:.2f} H:{self.current_5min_candle.high:.2f} L:{self.current_5min_candle.low:.2f} C:{self.current_5min_candle.close:.2f}")
+            self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
+            self.logger.info(f"   Type: {candle_type}")
+            self.logger.info(f"   --------------------------------------------------")
+
+    def _start_new_5m_candle(self, price, candle_start_time):
+        # Start new 5-minute candle with proper OHLC from 1m candle
+        if hasattr(self, 'current_1min_candle') and self.current_1min_candle:
+            # Use the 1m candle's OHLC data for the 5m candle
+            self.current_5min_candle = Candle(
+                timestamp=candle_start_time,
+                open_price=self.current_1min_candle.open,
+                high=self.current_1min_candle.high,
+                low=self.current_1min_candle.low,
+                close=self.current_1min_candle.close
+            )
+        else:
+            # Fallback to price if no 1m candle available
+            self.current_5min_candle = Candle(
+                timestamp=candle_start_time,
+                open_price=price,
+                high=price,
+                low=price,
+                close=price
+            )
+        self.last_5min_candle_time = candle_start_time
+
+        # Log new 5m candle start
+        if self.logger:
+            self.logger.info(f"🆕 5-MINUTE CANDLE STARTED")
+            self.logger.info(f"   Time: {candle_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(f"   Open: {self.current_5min_candle.open:.2f}")
+
     def _update_5min_candle(self, price, timestamp):
         """Update 5-minute candle - properly aggregate 1m candles into 5m candles"""
         # Calculate 5-minute boundary (e.g., 09:16:00 -> 09:15:00, 09:20:00 -> 09:20:00)
@@ -187,78 +301,55 @@ class CandleData:
         five_min_boundary = (minute // 5) * 5
         candle_start_time = timestamp.replace(minute=five_min_boundary, second=0, microsecond=0)
         
-        # Debug logging for 5m candle construction
-        if self.logger:
-            self.logger.debug(f"🔧 5M CANDLE UPDATE: {timestamp.strftime('%H:%M:%S')} -> {candle_start_time.strftime('%H:%M:%S')} | Price: {price:.2f}")
-            if self.current_5min_candle:
-                self.logger.debug(f"   Existing 5m candle: {self.current_5min_candle.timestamp.strftime('%H:%M:%S')}")
-        
+
         # Check if we need to start a new 5-minute candle
-        if not self.current_5min_candle or not safe_datetime_compare(self.current_5min_candle.timestamp, candle_start_time, "eq"):
+        prev_5min_candle = self.five_min_candles[-1] if self.five_min_candles else None
+        if safe_datetime_compare(timestamp, candle_start_time, "eq"):
             # Save previous 5-minute candle if it exists ( This would always be the case after initial setup)
-            if self.current_5min_candle:
-                self.five_min_candles.append(self.current_5min_candle)
-                self._classify_and_analyze_5min_candle(self.current_5min_candle)
-                if self.sweep_target and not self.target_swept:
+            self.five_min_candles.append(self.current_5min_candle)
+            self._classify_and_analyze_5min_candle(self.current_5min_candle)
+            self._log_5m_completion()
+
+            # Handle sweep target invalidation/adjustment on completed 5m candle
+            if self.sweep_target:
+                # If target already swept, we look for two consecutive 5m closes below target to invalidate
+                if self.target_swept:
                     if self.current_5min_candle.close < self.sweep_target:
                         self.count_five_min_close_below_sweep += 1
                         if self.count_five_min_close_below_sweep >= 2:
                             self.sweep_target_invalidated = True
                             self.two_CR_valid = False
+                            old_target = self.sweep_target
                             self.sweep_target = None
-                            if self.logger:
-                                self.logger.warning(f"⚠️ Sweep target {self.sweep_target:.2f} invalidated after {self.count_five_min_close_below_sweep} closes below target")
-                        else:
-                            self.two_CR_valid = True
-                    else:
-                        if self.get_candle_type(self.current_5min_candle) in ("BEAR", "NEUTRAL"):
-                            self.sweep_target = self.current_5min_candle.low
-                            self.sweep_set_time = self.current_5min_candle.timestamp
-                            if self.logger:
-                                self.logger.info(f"🎯 Sweep target adjusted to {self.sweep_target:.2f} from 5m candle at {self.sweep_set_time.strftime('%H:%M:%S')}")
                             self.count_five_min_close_below_sweep = 0
-
-                # Log completed 5m candle
-                if self.logger:
+                            if self.logger:
+                                old_target_str = f"{old_target:.2f}" if old_target is not None else "NONE"
+                                self.logger.warning(f"⚠️ SWEEP TARGET INVALIDATED after {self.count_five_min_close_below_sweep} 5m closes below target")
+                                self.logger.warning(f"   Invalidated Target: {old_target_str}")
+                    else:
+                        pass
+                else:
+                    # Before sweep: allow target refinement on BEAR/NEUTRAL 5m candles
                     candle_type = self.get_candle_type(self.current_5min_candle)
-                    candle_symbol = self.get_candle_symbol(self.current_5min_candle)
-                    body_size = self.current_5min_candle.body_size()
-                    total_range = self.current_5min_candle.high - self.current_5min_candle.low
-                    body_percentage = (body_size / total_range * 100) if total_range > 0 else 0
-                    
-                    self.logger.info(f"🕯️ 5-MINUTE CANDLE COMPLETED")
-                    self.logger.info(f"   Time: {self.current_5min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
-                    self.logger.info(f"   OHLC: O:{self.current_5min_candle.open:.2f} H:{self.current_5min_candle.high:.2f} L:{self.current_5min_candle.low:.2f} C:{self.current_5min_candle.close:.2f}")
-                    self.logger.info(f"   Body: {body_size:.2f} ({body_percentage:.1f}%)")
-                    self.logger.info(f"   Type: {candle_type}")
-                    self.logger.info(f"   --------------------------------------------------")
-            
-            # Start new 5-minute candle with proper OHLC from 1m candle
-            if hasattr(self, 'current_1min_candle') and self.current_1min_candle:
-                # Use the 1m candle's OHLC data for the 5m candle
-                self.current_5min_candle = Candle(
-                    timestamp=candle_start_time,
-                    open_price=self.current_1min_candle.open,
-                    high=self.current_1min_candle.high,
-                    low=self.current_1min_candle.low,
-                    close=self.current_1min_candle.close
-                )
-            else:
-                # Fallback to price if no 1m candle available
-                self.current_5min_candle = Candle(
-                    timestamp=candle_start_time,
-                    open_price=price,
-                    high=price,
-                    low=price,
-                    close=price
-                )
-            self.last_5min_candle_time = candle_start_time
-            
-            # Log new 5m candle start
-            if self.logger:
-                self.logger.info(f"🆕 5-MINUTE CANDLE STARTED")
-                self.logger.info(f"   Time: {candle_start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-                self.logger.info(f"   Open: {self.current_5min_candle.open:.2f}")
+                    if candle_type in ("BEAR", "NEUTRAL"):
+                        old_target = self.sweep_target
+                        self.sweep_target = self.current_5min_candle.low
+                        self.sweep_set_time = self.current_5min_candle.timestamp + timedelta(minutes=5)
+                        self.count_five_min_close_below_sweep = 0
+                        if self.logger:
+                            self.logger.info(f"🎯 SWEEP TARGET ADJUSTED (5m candle completion)!")
+                            old_target_str = f"{old_target:.2f}" if old_target else "NONE"
+                            self.logger.info(f"   Old Target: {old_target_str}")
+                            self.logger.info(f"   New Target: {self.sweep_target:.2f}")
+                            self.logger.info(f"   Set Time: {self.sweep_set_time.strftime('%H:%M:%S')}")
+                            self.logger.info(f"   From 5m Candle: {candle_type} at {self.current_5min_candle.timestamp.strftime('%H:%M:%S')}")
+                            self.logger.info(f"   5m Candle OHLC: O:{self.current_5min_candle.open:.2f} H:{self.current_5min_candle.high:.2f} L:{self.current_5min_candle.low:.2f} C:{self.current_5min_candle.close:.2f}")
+                            self.logger.info(f"   Reset close count: {self.count_five_min_close_below_sweep}")
+                    else:
+                        if self.logger:
+                            self.logger.info(f"ℹ️ SWEEP TARGET: Not adjusted - 5m candle is {candle_type} (need BEAR/NEUTRAL)")
+
+            self._start_new_5m_candle(price, candle_start_time)
         else:
             # Update existing 5-minute candle with proper OHLC aggregation
             if hasattr(self, 'current_1min_candle') and self.current_1min_candle:
@@ -287,7 +378,7 @@ class CandleData:
             self.session_low_time = candle.timestamp
         
         # Track bear candles for CISD
-        if candle_type == "BEAR":
+        if candle_type == "BEAR" or candle_type == "NEUTRAL":
             self.last_consecutive_bear_candles.append(candle)
         elif candle_type == "BULL":
             self.last_consecutive_bear_candles.clear()
@@ -344,10 +435,19 @@ class CandleData:
             self.current_5min_candle = candle
             self.last_5min_candle_time = candle.timestamp
             self.sweep_target = candle.low
-            self.sweep_set_time = candle.timestamp
+            self.sweep_set_time = candle.timestamp + timedelta(minutes=5)  # Set slightly after candle time
             self.target_swept = False
+            self.sweep_target_invalidated = False
+            self.two_CR_valid = True
+            self.count_five_min_close_below_sweep = 0
             if self.logger:
-                self.logger.info(f"Set initial 5-minute candle: {candle.timestamp.strftime('%H:%M:%S')} - O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+                self.logger.info(f"🎯 INITIAL SWEEP TARGET SET!")
+                self.logger.info(f"   From initial 5-minute candle: {candle.timestamp.strftime('%H:%M:%S')}")
+                self.logger.info(f"   OHLC: O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+                self.logger.info(f"   Sweep Target: {self.sweep_target:.2f}")
+                self.logger.info(f"   Set Time: {self.sweep_set_time.strftime('%H:%M:%S')}")
+                self.logger.info(f"   Target Swept: {self.target_swept}")
+                self.logger.info(f"   Two CR Valid: {self.two_CR_valid}")
     
     def set_initial_1min_candle(self, candle):
         """Set the initial 1-minute candle for proper tracking"""
@@ -364,36 +464,130 @@ class CandleData:
         Check if current 1m candle sweeps the target price
         
         Args:
-            target_price: The price level to check for sweep
             candle_time: Timestamp of the candle to check
         
         Returns:
             True if sweep detected, False otherwise
         """
+        # Enhanced logging for live trading debugging
+        if self.logger:
+            self.logger.info(f"🔍 SWEEP CHECK DEBUG:")
+            candle_time_str = candle_time.strftime('%Y-%m-%d %H:%M:%S') if candle_time else 'None'
+            self.logger.info(f"   Candle Time: {candle_time_str}")
+            self.logger.info(f"   Current 1m Candle: {'EXISTS' if self.current_1min_candle else 'NONE'}")
+            if self.current_1min_candle:
+                self.logger.info(f"   1m Candle Time: {self.current_1min_candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+                self.logger.info(f"   1m Candle OHLC: O:{self.current_1min_candle.open:.2f} H:{self.current_1min_candle.high:.2f} L:{self.current_1min_candle.low:.2f} C:{self.current_1min_candle.close:.2f}")
+            sweep_target_str = f"{self.sweep_target:.2f}" if self.sweep_target else "NONE"
+            self.logger.info(f"   Sweep Target: {sweep_target_str}")
+            self.logger.info(f"   Target Swept: {self.target_swept}")
+            self.logger.info(f"   Target Invalidated: {self.sweep_target_invalidated}")
+            self.logger.info(f"   Two CR Valid: {self.two_CR_valid}")
+            sweep_set_time_str = self.sweep_set_time.strftime('%Y-%m-%d %H:%M:%S') if self.sweep_set_time else 'NONE'
+            self.logger.info(f"   Sweep Set Time: {sweep_set_time_str}")
+        
+        # Check if we have a current 1-minute candle
         if not self.current_1min_candle:
+            if self.logger:
+                self.logger.warning(f"❌ SWEEP CHECK: No current 1-minute candle available")
             return False
         
         # Only check for sweep in candles that come AFTER the target was set
         if candle_time and self.current_1min_candle.timestamp < candle_time:
+            if self.logger:
+                self.logger.info(f"⏭️ SWEEP CHECK: Skipping - candle time {self.current_1min_candle.timestamp.strftime('%H:%M:%S')} < check time {candle_time.strftime('%H:%M:%S')}")
             return False
 
+        # If target already swept, continue tracking for deepest sweep.
+        # Preserve deepest_sweep_candle while the current 1m is forming; only update on completed 1m analysis
         if self.target_swept:
-            if self.get_candle_type(self.current_1min_candle) == "BULL":
-                self.deepest_sweep_candle = self.current_1min_candle
-            else:
-                self.deepest_sweep_candle = None
+            if self.logger:
+                self.logger.info(f"✅ SWEEP CHECK: Target already swept, tracking for deepest sweep")
+            # Do not mutate deepest_sweep_candle here to avoid clearing during forming candles
             return True
 
+        # Check if we have a sweep target set
+        if not self.sweep_target:
+            if self.logger:
+                self.logger.info(f"ℹ️ SWEEP CHECK: No sweep target set")
+            return False
+        
+        # Check if target is invalidated
+        if self.sweep_target_invalidated:
+            if self.logger:
+                self.logger.info(f"❌ SWEEP CHECK: Sweep target invalidated")
+            return False
+        
+        # Check if two CR is not valid
+        if not self.two_CR_valid:
+            if self.logger:
+                self.logger.info(f"❌ SWEEP CHECK: Two CR not valid")
+            return False
         
         # Check if this 1-minute candle sweeps the target
-        if self.sweep_target:
-            if self.current_1min_candle.low < self.sweep_target:
-                self.target_swept = True
-                if self.get_candle_type(self.current_1min_candle) == "BULL":
+        candle_low = self.current_1min_candle.low
+        if candle_low < self.sweep_target:
+            self.target_swept = True
+            candle_type = self.get_candle_type(self.current_1min_candle)
+            
+            if self.logger:
+                self.logger.info(f"🎯 SWEEP DETECTED!")
+                self.logger.info(f"   Sweep Target: {self.sweep_target:.2f}")
+                self.logger.info(f"   Candle Low: {candle_low:.2f}")
+                self.logger.info(f"   Sweep Depth: {self.sweep_target - candle_low:.2f}")
+                self.logger.info(f"   Candle Type: {candle_type}")
+                self.logger.info(f"   Candle Time: {self.current_1min_candle.timestamp.strftime('%H:%M:%S')}")
+            
+            # Do not update/clear deepest_sweep_candle here; defer to 1m completion classification
+            if not self.deepest_sweep_candle:
+                self.deepest_sweep_candle = self.current_1min_candle
+            else:
+                if candle_low < self.deepest_sweep_candle.low:
                     self.deepest_sweep_candle = self.current_1min_candle
-                else:
-                    self.deepest_sweep_candle = None
-                return True
+            return True
+        else:
+            if self.logger:
+                self.logger.info(f"ℹ️ SWEEP CHECK: No sweep - candle low {candle_low:.2f} >= target {self.sweep_target:.2f}")
+        
+        return False
+
+    def check_for_sweep_on_candle(self, candle: Candle) -> bool:
+        """
+        Check if the provided 1m candle sweeps the target price.
+
+        This is used when strategy logic needs to evaluate the sweep condition
+        against a specific completed 1m candle rather than the currently forming candle.
+        """
+        if not candle:
+            return False
+
+        if self.logger:
+            self.logger.info("🔍 SWEEP CHECK (ON PROVIDED CANDLE):")
+            self.logger.info(f"   Candle Time: {candle.timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
+            self.logger.info(f"   Candle OHLC: O:{candle.open:.2f} H:{candle.high:.2f} L:{candle.low:.2f} C:{candle.close:.2f}")
+            target_str = f"{self.sweep_target:.2f}" if self.sweep_target is not None else "NONE"
+            self.logger.info(f"   Sweep Target: {target_str}")
+            self.logger.info(f"   Target Swept: {self.target_swept}")
+            self.logger.info(f"   Target Invalidated: {self.sweep_target_invalidated}")
+            self.logger.info(f"   Two CR Valid: {self.two_CR_valid}")
+
+        if not self.sweep_target or self.sweep_target_invalidated or not self.two_CR_valid:
+            return False
+
+        if candle.low < self.sweep_target:
+            self.target_swept = True
+            if self.logger:
+                self.logger.info("🎯 SWEEP DETECTED (ON PROVIDED CANDLE)!")
+                self.logger.info(f"   Sweep Target: {self.sweep_target:.2f}")
+                self.logger.info(f"   Candle Low: {candle.low:.2f}")
+                self.logger.info(f"   Sweep Depth: {self.sweep_target - candle.low:.2f}")
+                self.logger.info(f"   Candle Type: {self.get_candle_type(candle)}")
+                self.logger.info(f"   Candle Time: {candle.timestamp.strftime('%H:%M:%S')}")
+            # Defer deepest_sweep_candle updates to completion flow
+            return True
+
+        if self.logger:
+            self.logger.info(f"ℹ️ SWEEP CHECK (ON PROVIDED CANDLE): No sweep - candle low {candle.low:.2f} >= target {self.sweep_target:.2f}")
         return False
     
     def detect_imps(self, target_ratio: float = 2.0) -> Optional[Dict]:
@@ -487,6 +681,46 @@ class CandleData:
                     'target': round_to_tick(target, self.tick_size),
                     'entry_candle': self.current_1min_candle
                 }
+
+        return None
+
+    def detect_cisd_on_candle(self, candle: Candle, target_ratio: float = 4.0) -> Optional[Dict]:
+        """
+        CISD using the provided completed 1m candle.
+        Primary: current close >= earliest bear-run open
+        Fallback: current close >= deepest_sweep_candle.close
+        """
+        if not candle:
+            return None
+
+        # Consecutive-bear run primary condition
+        if self.last_consecutive_bear_candles and len(self.last_consecutive_bear_candles) > 0:
+            first_bear_candle = self.last_consecutive_bear_candles[0]
+            last_bear_candle = self.last_consecutive_bear_candles[-1]
+            if candle.close >= first_bear_candle.open:
+                entry = first_bear_candle.open
+                stop_loss = last_bear_candle.low
+                target = entry + (entry - stop_loss) * target_ratio
+                return {
+                    'type': 'CISD',
+                    'entry': round_to_tick(entry, self.tick_size),
+                    'stop_loss': round_to_tick(stop_loss, self.tick_size),
+                    'target': round_to_tick(target, self.tick_size),
+                    'entry_candle': candle
+                }
+
+        # Fallback using deepest sweep candle
+        if self.deepest_sweep_candle and candle.close >= self.deepest_sweep_candle.close:
+            entry = self.deepest_sweep_candle.close
+            stop_loss = self.deepest_sweep_candle.low
+            target = entry + (entry - stop_loss) * target_ratio
+            return {
+                'type': 'CISD',
+                'entry': round_to_tick(entry, self.tick_size),
+                'stop_loss': round_to_tick(stop_loss, self.tick_size),
+                'target': round_to_tick(target, self.tick_size),
+                'entry_candle': candle
+            }
 
         return None
     

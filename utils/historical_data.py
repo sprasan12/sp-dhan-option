@@ -302,6 +302,8 @@ class HistoricalDataFetcher:
         
         end_date = reference_date
         start_date = end_date - timedelta(days=hist_days) # 14 calendar days to ensure 10 trading days
+        #start_date += timedelta(minutes=1)  # Market open time
+
         
         print(f"Fetching {hist_days} days of historical data for {symbol}")
         print(f"Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")

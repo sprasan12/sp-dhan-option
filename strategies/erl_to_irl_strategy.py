@@ -107,9 +107,20 @@ class ERLToIRLStrategy():
         # Check for FVG/IFVG mitigation
         self.liquidity_tracker.check_and_mark_mitigation(candle_1m)
 
-        if self.candle_data.check_for_sweep(candle_1m.timestamp):
+        # Check for sweep with enhanced logging
+        if self.logger:
+            self.logger.info(f"🔍 ERL-TO-IRL: Checking for sweep at {candle_1m.timestamp.strftime('%H:%M:%S')}")
+        
+        # Evaluate sweep on the completed 1m candle just processed, not the newly started one
+        sweep_detected = self.candle_data.check_for_sweep(candle_1m.timestamp)
+        
+        if self.logger:
+            self.logger.info(f"🔍 ERL-TO-IRL: Sweep check result: {sweep_detected}")
+        
+        if sweep_detected:
             if self.logger:
-                self.logger.info(f"Sweep conditions met at {candle_1m.timestamp}")
+                self.logger.info(f"✅ ERL-TO-IRL: Sweep conditions met at {candle_1m.timestamp.strftime('%H:%M:%S')}")
+            # Detect CISD on the completed 1m candle
             cisd_trigger = self.candle_data.detect_cisd()
             if cisd_trigger:
                 if self.logger:

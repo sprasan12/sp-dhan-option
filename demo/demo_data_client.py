@@ -135,8 +135,8 @@ class DemoDataClient:
                     print(f"Failed to get candle data: {response.status_code}")
                     time.sleep(5)  # Wait before retrying
                 
-                # Wait for next update (use a shorter interval to match demo server speed)
-                time.sleep(1)  # Check every second instead of every minute
+                # Wait for next update (poll faster than server advances to catch all candles)
+                time.sleep(1)  # Check every 1 second (server advances every 2 seconds)
                 
             except Exception as e:
                 print(f"Error in demo data stream: {e}")

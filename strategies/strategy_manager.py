@@ -74,11 +74,11 @@ class StrategyManager:
             logger=self.logger,
             candle_data=self.candle_data
         )
-        self.strategies.append({
-            'name': 'IRL_to_ERL',
-            'strategy': irl_to_erl,
-            'enabled': True
-        })
+        #self.strategies.append({
+        #    'name': 'IRL_to_ERL',
+        #    'strategy': irl_to_erl,
+        #    'enabled': True
+        #})
         
         if self.logger:
             self.logger.info(f"Initialized {len(self.strategies)} strategies: {[s['name'] for s in self.strategies]}")
@@ -218,9 +218,11 @@ class StrategyManager:
         
         # Log strategy processing start
         if self.logger:
-            self.logger.info(f"🔄 PROCESSING STRATEGIES")
+            self.logger.info(f"🔄 STRATEGY MANAGER: Processing 1m candle")
             self.logger.info(f"   Time: {timestamp.strftime('%Y-%m-%d %H:%M:%S')}")
             self.logger.info(f"   OHLC: O:{ohlc_data['open']:.2f} H:{ohlc_data['high']:.2f} L:{ohlc_data['low']:.2f} C:{ohlc_data['close']:.2f}")
+            self.logger.info(f"   In Trade: {self.in_trade}")
+            self.logger.info(f"   Current Trade: {'EXISTS' if self.current_trade else 'NONE'}")
         
         # Update candle data
         #self.candle_data.update_1min_candle_with_data(candle_data, timestamp)
